@@ -1,40 +1,13 @@
 use std::cmp::Ordering;
 
 use crate::model::{
-    Action, AnalyzeOptions, CandidateScore, ColumnProfile, CompressionAlgorithm, Confidence,
-    EncodingCandidate, EncodingTag, EstimateBasis, Location, ProbeReport, SavingsEstimate,
-    Severity, Suggestion,
+    Action, AnalyzeOptions, CandidateScore, ColumnProfile, CompressionAlgorithm,
+    CompressionMeasurement, Confidence, DEFAULT_ENCODING_CANDIDATES, EncodingCandidate,
+    EncodingTag, EstimateBasis, Location, ProbeReport, SavingsEstimate, Severity, Suggestion,
 };
 
-// Each (algorithm, level) pair is scored as a distinct encoding candidate.
-// The ZSTD levels span fast, balanced, and high-compression operating points.
-const CANDIDATES: [EncodingCandidate; 6] = [
-    EncodingCandidate {
-        algorithm: CompressionAlgorithm::Lz4,
-        level: None,
-    },
-    EncodingCandidate {
-        algorithm: CompressionAlgorithm::Zstd,
-        level: Some(1),
-    },
-    EncodingCandidate {
-        algorithm: CompressionAlgorithm::Zstd,
-        level: Some(3),
-    },
-    EncodingCandidate {
-        algorithm: CompressionAlgorithm::Zstd,
-        level: Some(6),
-    },
-    EncodingCandidate {
-        algorithm: CompressionAlgorithm::Zstd,
-        level: Some(9),
-    },
-    EncodingCandidate {
-        algorithm: CompressionAlgorithm::Zstd,
-        level: Some(12),
-    },
-];
-
+/// Evaluate measured general-compression candidates for every physical column
+/// in a probed Lance data file.
 pub(crate) fn check(probe: &ProbeReport, options: AnalyzeOptions) -> Vec<Suggestion> {
     probe
         .columns
@@ -43,6 +16,8 @@ pub(crate) fn check(probe: &ProbeReport, options: AnalyzeOptions) -> Vec<Suggest
         .collect()
 }
 
+/// Compare one column's bounded re-encoding measurements and return a
+/// recommendation only when another (algorithm, level) candidate wins.
 fn check_column(column: &ColumnProfile, options: AnalyzeOptions) -> Option<Suggestion> {
     if column.encoding_tags.contains(&EncodingTag::Unknown) {
         return Some(Suggestion {
@@ -56,132 +31,162 @@ fn check_column(column: &ColumnProfile, options: AnalyzeOptions) -> Option<Sugge
             evidence: vec!["unknown encoding tag".into()],
         });
     }
+    // Blob pages only contain (position, size) descriptors; their external
+    // payload bytes are not re-encoded by Lance's general-compression setting.
     if column.encoding_tags.contains(&EncodingTag::StructuralBlob) {
         return None;
     }
 
-    let has_codec = column.encoding_tags.contains(&EncodingTag::GeneralLz4)
-        || column.encoding_tags.contains(&EncodingTag::GeneralZstd);
-    if has_codec {
-        return None;
+    if column.compression_measurements.is_empty() {
+        return Some(Suggestion {
+            rule: "compression-probe-unavailable".into(),
+            severity: Severity::Info,
+            location: column_location(column),
+            message: "No bounded re-encoding measurements are available for this column.".into(),
+            action: Action::ProbeEncodings {
+                candidates: DEFAULT_ENCODING_CANDIDATES.to_vec(),
+            },
+            estimate: None,
+            candidate_scores: vec![],
+            evidence: vec!["run the probe with --sample-rows greater than zero".into()],
+        });
     }
 
-    let mut candidate_scores = CANDIDATES
-        .into_iter()
-        .map(|candidate| score_candidate(column, candidate, options))
+    let mut candidate_scores = column
+        .compression_measurements
+        .iter()
+        .map(|measurement| score_candidate(column, measurement, options))
         .collect::<Vec<_>>();
     candidate_scores.sort_by(|left, right| {
         left.effective_score
             .partial_cmp(&right.effective_score)
             .unwrap_or(Ordering::Equal)
     });
-    let winner = &candidate_scores[0];
-    let (lower_percent, upper_percent) = heuristic_savings_range(column, winner.candidate);
+    let winner = candidate_scores[0].candidate;
+    let current = current_candidates(column);
+    if current.len() == 1 && current.contains(&winner) {
+        return None;
+    }
+
+    let baseline = column
+        .compression_measurements
+        .iter()
+        .find(|measurement| measurement.candidate.algorithm == CompressionAlgorithm::Uncompressed);
+    let winner_measurement = column
+        .compression_measurements
+        .iter()
+        .find(|measurement| measurement.candidate == winner)?;
+    let estimate = baseline.map(|baseline| {
+        let saved = baseline
+            .encoded_bytes
+            .saturating_sub(winner_measurement.encoded_bytes);
+        let percent = saved
+            .saturating_mul(100)
+            .checked_div(baseline.encoded_bytes)
+            .unwrap_or(0)
+            .min(100) as u8;
+        SavingsEstimate {
+            basis: EstimateBasis::MeasuredProbe,
+            confidence: Confidence::Medium,
+            lower_bytes: saved,
+            upper_bytes: saved,
+            lower_percent: percent,
+            upper_percent: percent,
+            caveat: format!(
+                "Measured on {} sampled rows; distributions may differ across the remaining rows.",
+                winner_measurement.sample_rows
+            ),
+        }
+    });
+    let ranking_mode = if options.consider_decoding_penalty {
+        "measured sample size plus decoding penalty"
+    } else {
+        "measured sample size"
+    };
+    let current_label = if current.is_empty() {
+        "uncompressed".into()
+    } else {
+        current
+            .iter()
+            .map(|candidate| candidate_name(*candidate))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let current_is_uncompressed =
+        current.len() == 1 && current[0].algorithm == CompressionAlgorithm::Uncompressed;
     let candidates = candidate_scores
         .iter()
         .map(|score| score.candidate)
-        .collect::<Vec<_>>();
-    let ranking_mode = if options.consider_decoding_penalty {
-        "estimated size plus decoding penalty"
-    } else {
-        "estimated size only"
-    };
+        .collect();
 
     Some(Suggestion {
-        rule: "general-compression-opportunity".into(),
+        rule: if current.is_empty() || current_is_uncompressed {
+            "general-compression-opportunity"
+        } else {
+            "general-compression-tuning"
+        }
+        .into(),
         severity: Severity::Suggestion,
         location: column_location(column),
         message: format!(
-            "General compression is not observed. Probe each (algorithm, level) candidate; current winner by {ranking_mode} is {}.",
-            candidate_name(winner.candidate)
+            "Current compression is {current_label}; {} wins by {ranking_mode}.",
+            candidate_name(winner)
         ),
         action: Action::ProbeEncodings { candidates },
-        estimate: Some(SavingsEstimate {
-            basis: EstimateBasis::EncodingHeuristic,
-            confidence: Confidence::Low,
-            lower_bytes: percent_of(column.on_disk_bytes, lower_percent),
-            upper_bytes: percent_of(column.on_disk_bytes, upper_percent),
-            lower_percent,
-            upper_percent,
-            caveat: "Ranges and decode penalties are heuristics; validate every candidate by bounded re-encoding and decode benchmarks.".into(),
-        }),
+        estimate,
         candidate_scores,
         evidence: vec![
-            format!("{} on-disk bytes", column.on_disk_bytes),
+            format!("{} current on-disk bytes", column.on_disk_bytes),
             format!(
-                "existing encodings: {}",
-                existing_encoding_summary(column)
+                "{} rows were independently re-encoded for each candidate",
+                winner_measurement.sample_rows
             ),
-            format!("ranking mode: {ranking_mode}"),
         ],
     })
 }
 
+/// Convert one measured sample size into a comparable score. The raw encoded
+/// bytes remain unchanged; optional policy factors only affect candidate
+/// ranking and are reported separately.
 fn score_candidate(
     column: &ColumnProfile,
-    candidate: EncodingCandidate,
+    measurement: &CompressionMeasurement,
     options: AnalyzeOptions,
 ) -> CandidateScore {
-    let (savings_lower, savings_upper) = heuristic_savings_range(column, candidate);
-    let estimated_bytes_lower = remaining_bytes(column.on_disk_bytes, savings_upper);
-    let estimated_bytes_upper = remaining_bytes(column.on_disk_bytes, savings_lower);
-    let consideration_factor = if is_already_compact(column) { 1.2 } else { 1.0 };
+    let consideration_factor = consideration_factor(column, measurement.candidate);
     let decoding_penalty = if options.consider_decoding_penalty {
-        decode_penalty(candidate)
+        decode_penalty(measurement.candidate)
     } else {
         1.0
     };
-    let midpoint = (estimated_bytes_lower as f64 + estimated_bytes_upper as f64) / 2.0;
-
     CandidateScore {
-        candidate,
-        estimated_bytes_lower,
-        estimated_bytes_upper,
+        candidate: measurement.candidate,
+        sample_rows: measurement.sample_rows,
+        encoded_bytes: measurement.encoded_bytes,
         consideration_factor,
         decoding_penalty,
-        effective_score: midpoint * consideration_factor * decoding_penalty,
+        effective_score: measurement.encoded_bytes as f64 * consideration_factor * decoding_penalty,
     }
 }
 
-fn heuristic_savings_range(column: &ColumnProfile, candidate: EncodingCandidate) -> (u8, u8) {
-    let text_like = is_text_like(&column.data_type);
-    let compact = is_already_compact(column);
-    match (candidate.algorithm, candidate.level, text_like, compact) {
-        (CompressionAlgorithm::Lz4, _, _, false) => (5, 30),
-        (CompressionAlgorithm::Lz4, _, _, true) => (2, 15),
-        (CompressionAlgorithm::Zstd, Some(1), true, false) => (20, 55),
-        (CompressionAlgorithm::Zstd, Some(3), true, false) => (25, 65),
-        (CompressionAlgorithm::Zstd, Some(6), true, false) => (28, 69),
-        (CompressionAlgorithm::Zstd, Some(9), true, false) => (30, 72),
-        (CompressionAlgorithm::Zstd, Some(12), true, false) => (32, 75),
-        (CompressionAlgorithm::Zstd, Some(1), false, false) => (8, 35),
-        (CompressionAlgorithm::Zstd, Some(3), false, false) => (10, 45),
-        (CompressionAlgorithm::Zstd, Some(6), false, false) => (13, 49),
-        (CompressionAlgorithm::Zstd, Some(9), false, false) => (15, 52),
-        (CompressionAlgorithm::Zstd, Some(12), false, false) => (17, 55),
-        (CompressionAlgorithm::Zstd, Some(1), _, true) => (2, 18),
-        (CompressionAlgorithm::Zstd, Some(3), _, true) => (3, 25),
-        (CompressionAlgorithm::Zstd, Some(6), _, true) => (4, 28),
-        (CompressionAlgorithm::Zstd, Some(9), _, true) => (5, 30),
-        (CompressionAlgorithm::Zstd, Some(12), _, true) => (6, 32),
-        (CompressionAlgorithm::Zstd, None, _, _) => (3, 25),
-        (CompressionAlgorithm::Zstd, Some(_), _, _) => (3, 25),
+fn current_candidates(column: &ColumnProfile) -> Vec<EncodingCandidate> {
+    if !column.observed_compressions.is_empty() {
+        return column.observed_compressions.iter().copied().collect();
     }
+    if column
+        .encoding_tags
+        .contains(&EncodingTag::GeneralUncompressed)
+    {
+        return vec![EncodingCandidate {
+            algorithm: CompressionAlgorithm::Uncompressed,
+            level: None,
+        }];
+    }
+    vec![]
 }
 
-fn decode_penalty(candidate: EncodingCandidate) -> f64 {
-    match (candidate.algorithm, candidate.level) {
-        (CompressionAlgorithm::Lz4, _) => 1.0,
-        (CompressionAlgorithm::Zstd, Some(level)) if level <= 1 => 1.15,
-        (CompressionAlgorithm::Zstd, Some(level)) if level <= 3 => 1.25,
-        (CompressionAlgorithm::Zstd, Some(level)) if level <= 6 => 1.45,
-        (CompressionAlgorithm::Zstd, Some(level)) if level <= 9 => 1.75,
-        (CompressionAlgorithm::Zstd, _) => 2.0,
-    }
-}
-
-fn is_already_compact(column: &ColumnProfile) -> bool {
-    [
+fn consideration_factor(column: &ColumnProfile, candidate: EncodingCandidate) -> f64 {
+    let compact = [
         EncodingTag::Dictionary,
         EncodingTag::Rle,
         EncodingTag::BitPacked,
@@ -192,14 +197,23 @@ fn is_already_compact(column: &ColumnProfile) -> bool {
         EncodingTag::PackedStruct,
     ]
     .iter()
-    .any(|tag| column.encoding_tags.contains(tag))
+    .any(|tag| column.encoding_tags.contains(tag));
+    if compact && candidate.algorithm != CompressionAlgorithm::Uncompressed {
+        1.2
+    } else {
+        1.0
+    }
 }
 
-fn is_text_like(data_type: &str) -> bool {
-    let data_type = data_type.to_ascii_lowercase();
-    ["utf8", "string", "binary", "largeutf8", "largebinary"]
-        .iter()
-        .any(|needle| data_type.contains(needle))
+fn decode_penalty(candidate: EncodingCandidate) -> f64 {
+    match (candidate.algorithm, candidate.level) {
+        (CompressionAlgorithm::Uncompressed | CompressionAlgorithm::Lz4, _) => 1.0,
+        (CompressionAlgorithm::Zstd, Some(level)) if level <= 1 => 1.15,
+        (CompressionAlgorithm::Zstd, Some(level)) if level <= 3 => 1.25,
+        (CompressionAlgorithm::Zstd, Some(level)) if level <= 6 => 1.45,
+        (CompressionAlgorithm::Zstd, Some(level)) if level <= 9 => 1.75,
+        (CompressionAlgorithm::Zstd, _) => 2.0,
+    }
 }
 
 fn candidate_name(candidate: EncodingCandidate) -> String {
@@ -216,106 +230,90 @@ fn column_location(column: &ColumnProfile) -> Location {
     }
 }
 
-fn percent_of(bytes: u64, percent: u8) -> u64 {
-    bytes.saturating_mul(u64::from(percent)) / 100
-}
-
-fn remaining_bytes(bytes: u64, savings_percent: u8) -> u64 {
-    bytes.saturating_sub(percent_of(bytes, savings_percent))
-}
-
-fn existing_encoding_summary(column: &ColumnProfile) -> String {
-    column
-        .encoding_tags
-        .iter()
-        .filter(|tag| **tag != EncodingTag::Unknown)
-        .map(|tag| format!("{tag:?}").to_lowercase())
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
-    use crate::model::REPORT_SCHEMA_VERSION;
 
-    fn report(data_type: &str) -> ProbeReport {
-        let bytes = 100 * 1024 * 1024;
+    fn report(current: EncodingCandidate) -> ProbeReport {
+        let measurements = DEFAULT_ENCODING_CANDIDATES
+            .iter()
+            .enumerate()
+            .map(|(index, candidate)| CompressionMeasurement {
+                candidate: *candidate,
+                sample_rows: 1_024,
+                encoded_bytes: [100, 80, 70, 60, 55, 52, 50][index],
+            })
+            .collect();
         ProbeReport {
-            schema_version: REPORT_SCHEMA_VERSION,
             source: "test.lance".into(),
             file_version: "2.3".into(),
-            file_size_bytes: bytes,
-            data_bytes: bytes,
-            rows: 100,
+            file_size_bytes: 100,
+            data_bytes: 100,
+            rows: 1_024,
             columns: vec![ColumnProfile {
                 index: 0,
                 path: "value".into(),
-                data_type: data_type.into(),
+                data_type: "Utf8".into(),
                 pages: 1,
-                on_disk_bytes: bytes,
+                on_disk_bytes: 100,
                 field_metadata: BTreeMap::new(),
-                encoding_tags: BTreeSet::from([
-                    EncodingTag::GeneralUncompressed,
-                    EncodingTag::Flat,
-                ]),
+                encoding_tags: BTreeSet::new(),
+                observed_compressions: if current.algorithm == CompressionAlgorithm::Uncompressed {
+                    BTreeSet::new()
+                } else {
+                    BTreeSet::from([current])
+                },
+                compression_measurements: measurements,
                 raw_page_encodings: vec![],
             }],
         }
     }
 
     #[test]
-    fn each_algorithm_level_is_a_distinct_candidate() {
-        let suggestions = check(&report("Utf8"), AnalyzeOptions::default());
-        let candidates = &suggestions[0].candidate_scores;
-        assert_eq!(candidates.len(), 6);
-        assert!(candidates.iter().any(|score| {
-            score.candidate.algorithm == CompressionAlgorithm::Zstd
-                && score.candidate.level == Some(12)
-        }));
-        assert_eq!(candidates[0].candidate.level, Some(12));
+    fn measured_bytes_select_high_compression_without_penalty() {
+        let current = DEFAULT_ENCODING_CANDIDATES[0];
+        let suggestions = check(&report(current), AnalyzeOptions::default());
+        assert_eq!(
+            suggestions[0].candidate_scores[0].candidate,
+            DEFAULT_ENCODING_CANDIDATES[6]
+        );
+        assert_eq!(
+            suggestions[0].estimate.as_ref().unwrap().basis,
+            EstimateBasis::MeasuredProbe
+        );
     }
 
     #[test]
-    fn decoding_penalty_changes_fixed_width_winner_to_lz4() {
+    fn decoding_penalty_changes_the_winning_level() {
         let suggestions = check(
-            &report("Float32"),
+            &report(DEFAULT_ENCODING_CANDIDATES[0]),
             AnalyzeOptions {
                 consider_decoding_penalty: true,
             },
         );
         assert_eq!(
-            suggestions[0].candidate_scores[0].candidate.algorithm,
-            CompressionAlgorithm::Lz4
-        );
-        assert_eq!(suggestions[0].candidate_scores[0].decoding_penalty, 1.0);
-    }
-
-    #[test]
-    fn penalties_are_disabled_by_default() {
-        let suggestions = check(&report("Utf8"), AnalyzeOptions::default());
-        assert!(
-            suggestions[0]
-                .candidate_scores
-                .iter()
-                .all(|score| score.decoding_penalty == 1.0)
+            suggestions[0].candidate_scores[0].candidate,
+            DEFAULT_ENCODING_CANDIDATES[3]
         );
     }
 
     #[test]
-    fn compact_base_encoding_gets_duckdb_style_consideration_factor() {
-        let mut probe = report("Utf8");
-        probe.columns[0]
-            .encoding_tags
-            .insert(EncodingTag::Dictionary);
-        let suggestions = check(&probe, AnalyzeOptions::default());
-        assert!(
-            suggestions[0]
-                .candidate_scores
-                .iter()
-                .all(|score| score.consideration_factor == 1.2)
+    fn existing_codec_is_still_compared() {
+        let suggestions = check(
+            &report(DEFAULT_ENCODING_CANDIDATES[3]),
+            AnalyzeOptions::default(),
         );
+        assert_eq!(suggestions[0].rule, "general-compression-tuning");
+    }
+
+    #[test]
+    fn current_winner_emits_no_suggestion() {
+        let suggestions = check(
+            &report(DEFAULT_ENCODING_CANDIDATES[6]),
+            AnalyzeOptions::default(),
+        );
+        assert!(suggestions.is_empty());
     }
 }

@@ -96,11 +96,10 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
-    use crate::model::{ColumnProfile, REPORT_SCHEMA_VERSION};
+    use crate::model::ColumnProfile;
 
     fn report(version: &str, tags: &[EncodingTag]) -> ProbeReport {
         ProbeReport {
-            schema_version: REPORT_SCHEMA_VERSION,
             source: "test.lance".into(),
             file_version: version.into(),
             file_size_bytes: 1024,
@@ -114,6 +113,8 @@ mod tests {
                 on_disk_bytes: 1024,
                 field_metadata: BTreeMap::new(),
                 encoding_tags: tags.iter().copied().collect::<BTreeSet<_>>(),
+                observed_compressions: BTreeSet::new(),
+                compression_measurements: vec![],
                 raw_page_encodings: vec![],
             }],
         }

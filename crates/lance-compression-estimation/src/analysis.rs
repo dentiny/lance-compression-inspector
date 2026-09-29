@@ -15,7 +15,6 @@ pub fn analyze_dataset_with_options(
     options: AnalyzeOptions,
 ) -> DatasetAnalysisReport {
     DatasetAnalysisReport {
-        schema_version: probe.schema_version,
         source: probe.source,
         branch: probe.branch,
         manifest_version: probe.manifest_version,

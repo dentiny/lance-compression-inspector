@@ -7,10 +7,14 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path as FsPath,
+    sync::Arc,
 };
 
 use anyhow::{Context, Result};
-use lance::dataset::builder::DatasetBuilder;
+use arrow_array::{RecordBatch, RecordBatchIterator};
+use arrow_schema::{Field as ArrowField, Schema as ArrowSchema};
+use futures::{TryStreamExt, future::try_join_all};
+use lance::{Dataset, dataset::builder::DatasetBuilder};
 use lance_file::reader::{FileReader, describe_encoding};
 use lance_io::{
     object_store::ObjectStore,
@@ -18,7 +22,10 @@ use lance_io::{
     utils::CachedFileSize,
 };
 
-use crate::{ColumnProfile, DatasetProbeReport, EncodingTag, ProbeReport, REPORT_SCHEMA_VERSION};
+use crate::{
+    ColumnProfile, CompressionAlgorithm, CompressionMeasurement, DEFAULT_ENCODING_CANDIDATES,
+    DatasetProbeReport, EncodingCandidate, EncodingTag, ProbeReport,
+};
 
 /// Resolve a local dataset snapshot from its manifest and probe every active
 /// Lance data file. `version=None` selects the latest version on `branch`.
@@ -26,6 +33,7 @@ pub async fn probe_local_dataset(
     source: impl AsRef<FsPath>,
     branch: &str,
     version: Option<u64>,
+    sample_rows: usize,
 ) -> Result<DatasetProbeReport> {
     let source = source.as_ref();
     let canonical = source
@@ -76,8 +84,11 @@ pub async fn probe_local_dataset(
         files.push(probe_local_file(data_path).await?);
     }
 
+    if sample_rows > 0 {
+        attach_sample_measurements(&dataset, sample_rows, &mut files).await?;
+    }
+
     Ok(DatasetProbeReport {
-        schema_version: REPORT_SCHEMA_VERSION,
         source: canonical.display().to_string(),
         branch: dataset
             .manifest
@@ -89,6 +100,160 @@ pub async fn probe_local_dataset(
         physical_rows,
         files,
     })
+}
+
+async fn attach_sample_measurements(
+    dataset: &Dataset,
+    sample_rows: usize,
+    files: &mut [ProbeReport],
+) -> Result<()> {
+    let mut candidates = DEFAULT_ENCODING_CANDIDATES.to_vec();
+    for candidate in files
+        .iter()
+        .flat_map(|file| &file.columns)
+        .flat_map(|column| &column.observed_compressions)
+    {
+        if !candidates.contains(candidate) {
+            candidates.push(*candidate);
+        }
+    }
+
+    // Sample each fragment independently so one fragment's distribution is
+    // never used to recommend settings for another fragment's physical files.
+    for fragment in dataset.iter_fragments() {
+        let mut scanner = dataset.scan();
+        scanner.with_fragments(vec![fragment.clone()]);
+        scanner.limit(Some(sample_rows as i64), None)?;
+        let batches = scanner
+            .try_into_stream()
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?;
+        if batches.is_empty() {
+            continue;
+        }
+        let measured_rows = batches.iter().map(RecordBatch::num_rows).sum::<usize>() as u64;
+
+        // Each candidate writes its own temporary Lance dataset. Running these
+        // futures together parallelizes encoding of the same fragment sample.
+        let measurements = try_join_all(
+            candidates
+                .iter()
+                .copied()
+                .map(|candidate| measure_candidate(batches.clone(), candidate, measured_rows)),
+        )
+        .await?;
+        let fragment_paths = fragment
+            .referenced_lance_files()
+            .map(|data_file| data_file.path.as_str())
+            .collect::<Vec<_>>();
+
+        for file in files.iter_mut().filter(|file| {
+            fragment_paths
+                .iter()
+                .any(|path| file.source.ends_with(path))
+        }) {
+            for column in &mut file.columns {
+                column.compression_measurements = measurements
+                    .iter()
+                    .filter_map(|measurement| {
+                        measurement
+                            .column_bytes
+                            .get(&column.path)
+                            .map(|encoded_bytes| CompressionMeasurement {
+                                candidate: measurement.candidate,
+                                sample_rows: measurement.sample_rows,
+                                encoded_bytes: *encoded_bytes,
+                            })
+                    })
+                    .collect();
+            }
+        }
+    }
+    Ok(())
+}
+
+struct CandidateMeasurement {
+    candidate: EncodingCandidate,
+    sample_rows: u64,
+    column_bytes: BTreeMap<String, u64>,
+}
+
+async fn measure_candidate(
+    batches: Vec<RecordBatch>,
+    candidate: EncodingCandidate,
+    sample_rows: u64,
+) -> Result<CandidateMeasurement> {
+    let (schema, batches) = with_candidate_schema(batches, candidate)?;
+    let reader = RecordBatchIterator::new(batches.into_iter().map(Ok), schema);
+    let temp_dir = tempfile::tempdir()?;
+    let dataset_path = temp_dir.path().join("sample.lance");
+    let uri = dataset_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("temporary sample path is not valid UTF-8"))?;
+    let dataset = Dataset::write(reader, uri, None).await?;
+
+    let data_file = dataset
+        .iter_fragments()
+        .flat_map(|fragment| fragment.referenced_lance_files())
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("sample rewrite produced no data file"))?;
+    let root_relative = dataset_path.join(&data_file.path);
+    let data_path = if root_relative.exists() {
+        root_relative
+    } else {
+        dataset_path.join("data").join(&data_file.path)
+    };
+    let report = probe_local_file(data_path).await?;
+    Ok(CandidateMeasurement {
+        candidate,
+        sample_rows,
+        column_bytes: report
+            .columns
+            .into_iter()
+            .map(|column| (column.path, column.on_disk_bytes))
+            .collect(),
+    })
+}
+
+fn with_candidate_schema(
+    batches: Vec<RecordBatch>,
+    candidate: EncodingCandidate,
+) -> Result<(Arc<ArrowSchema>, Vec<RecordBatch>)> {
+    let source_schema = batches[0].schema();
+    let fields = source_schema
+        .fields()
+        .iter()
+        .map(|field| Arc::new(with_candidate_field(field, candidate)))
+        .collect::<Vec<_>>();
+    let schema = Arc::new(ArrowSchema::new_with_metadata(
+        fields,
+        source_schema.metadata().clone(),
+    ));
+    let batches = batches
+        .into_iter()
+        .map(|batch| {
+            RecordBatch::try_new(schema.clone(), batch.columns().to_vec())
+                .map_err(anyhow::Error::from)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok((schema, batches))
+}
+
+fn with_candidate_field(field: &ArrowField, candidate: EncodingCandidate) -> ArrowField {
+    let mut metadata = field.metadata().clone();
+    let scheme = match candidate.algorithm {
+        CompressionAlgorithm::Uncompressed => "none",
+        CompressionAlgorithm::Lz4 => "lz4",
+        CompressionAlgorithm::Zstd => "zstd",
+    };
+    metadata.insert("lance-encoding:compression".into(), scheme.into());
+    if let Some(level) = candidate.level {
+        metadata.insert("lance-encoding:compression-level".into(), level.to_string());
+    } else {
+        metadata.remove("lance-encoding:compression-level");
+    }
+    field.clone().with_metadata(metadata)
 }
 
 /// Probe a local standalone Lance data file without decoding column values.
@@ -132,6 +297,10 @@ pub async fn probe_local_file(source: impl AsRef<FsPath>) -> Result<ProbeReport>
             if encoding_tags.is_empty() {
                 encoding_tags.insert(EncodingTag::Unknown);
             }
+            let observed_compressions = raw_page_encodings
+                .iter()
+                .flat_map(|description| classify_general_compressions(description))
+                .collect();
 
             ColumnProfile {
                 index,
@@ -151,13 +320,14 @@ pub async fn probe_local_file(source: impl AsRef<FsPath>) -> Result<ProbeReport>
                     .map(|(_, field)| field.metadata.clone().into_iter().collect())
                     .unwrap_or_else(BTreeMap::new),
                 encoding_tags,
+                observed_compressions,
+                compression_measurements: vec![],
                 raw_page_encodings,
             }
         })
         .collect();
 
     Ok(ProbeReport {
-        schema_version: REPORT_SCHEMA_VERSION,
         source: canonical.display().to_string(),
         file_version: metadata.version.to_string(),
         file_size_bytes: metadata.file_size_bytes,
@@ -288,6 +458,42 @@ pub fn classify_encoding(description: &str) -> BTreeSet<EncodingTag> {
     tags
 }
 
+/// Extract the concrete general-compression scheme and level from page
+/// encoding debug descriptions emitted by Lance.
+pub fn classify_general_compressions(description: &str) -> BTreeSet<EncodingCandidate> {
+    description
+        .to_ascii_lowercase()
+        .split("scheme:")
+        .skip(1)
+        .filter_map(|suffix| {
+            let details = &suffix[..suffix.len().min(192)];
+            let algorithm = if details.contains("compressionalgorithmzstd")
+                || details.trim_start().starts_with("\"zstd\"")
+                || details.trim_start().starts_with("zstd")
+            {
+                CompressionAlgorithm::Zstd
+            } else if details.contains("compressionalgorithmlz4")
+                || details.trim_start().starts_with("\"lz4\"")
+                || details.trim_start().starts_with("lz4")
+            {
+                CompressionAlgorithm::Lz4
+            } else {
+                return None;
+            };
+            Some(EncodingCandidate {
+                algorithm,
+                level: parse_debug_level(details),
+            })
+        })
+        .collect()
+}
+
+fn parse_debug_level(description: &str) -> Option<i32> {
+    let value = description.split_once("level: some(")?.1;
+    let value = value.split_once(')')?.0.trim();
+    value.parse().ok()
+}
+
 fn variant_present(description: &str, name: &str) -> bool {
     description.contains(&format!("{name}(")) || description.contains(&format!("{name} {{"))
 }
@@ -329,5 +535,26 @@ mod tests {
         assert!(!tags.contains(&EncodingTag::Dictionary));
         assert!(!tags.contains(&EncodingTag::Block));
         assert!(!tags.contains(&EncodingTag::Value));
+    }
+
+    #[test]
+    fn extracts_general_compression_levels() {
+        let encodings = classify_general_compressions(
+            "General { compression: BufferCompression { scheme: CompressionAlgorithmZstd, level: Some(6) } } \
+             General { compression: Compression { scheme: \"lz4\", level: None } }",
+        );
+        assert_eq!(
+            encodings,
+            BTreeSet::from([
+                EncodingCandidate {
+                    algorithm: CompressionAlgorithm::Lz4,
+                    level: None,
+                },
+                EncodingCandidate {
+                    algorithm: CompressionAlgorithm::Zstd,
+                    level: Some(6),
+                },
+            ])
+        );
     }
 }

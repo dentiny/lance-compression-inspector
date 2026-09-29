@@ -2660,11 +2660,15 @@ name = "lance-compression-estimation"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arrow-array",
+ "arrow-schema",
+ "futures",
  "lance",
  "lance-core",
  "lance-file",
  "lance-io",
  "serde",
+ "tempfile",
 ]
 
 [[package]]

@@ -8,8 +8,12 @@ description = "Probing and encoding-aware optimization estimates for Lance files
 
 [dependencies]
 anyhow.workspace = true
+arrow-array.workspace = true
+arrow-schema.workspace = true
+futures.workspace = true
 lance.workspace = true
 lance-core.workspace = true
 lance-file.workspace = true
 lance-io.workspace = true
 serde.workspace = true
+tempfile.workspace = true

@@ -2,11 +2,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-pub const REPORT_SCHEMA_VERSION: u32 = 1;
+/// Maximum visible rows sampled from each dataset fragment. Every active
+/// physical data file in that fragment is evaluated on the same row sample;
+/// this is not a per-page or per-row-group limit.
+pub const DEFAULT_SAMPLE_ROWS: usize = 16_384;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DatasetProbeReport {
-    pub schema_version: u32,
     pub source: String,
     pub branch: String,
     pub manifest_version: u64,
@@ -17,7 +19,6 @@ pub struct DatasetProbeReport {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DatasetAnalysisReport {
-    pub schema_version: u32,
     pub source: String,
     pub branch: String,
     pub manifest_version: u64,
@@ -28,7 +29,6 @@ pub struct DatasetAnalysisReport {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProbeReport {
-    pub schema_version: u32,
     pub source: String,
     pub file_version: String,
     pub file_size_bytes: u64,
@@ -47,6 +47,10 @@ pub struct ColumnProfile {
     pub field_metadata: BTreeMap<String, String>,
     /// Normalized tags discovered by walking every page's encoding description.
     pub encoding_tags: BTreeSet<EncodingTag>,
+    /// General-compression configurations observed across this column's pages.
+    pub observed_compressions: BTreeSet<EncodingCandidate>,
+    /// Sizes measured by re-encoding a bounded dataset sample.
+    pub compression_measurements: Vec<CompressionMeasurement>,
     /// Lossless fallback for new or unknown Lance encodings.
     pub raw_page_encodings: Vec<String>,
 }
@@ -129,25 +133,64 @@ pub enum Action {
     InspectUnknownEncoding,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum CompressionAlgorithm {
+    Uncompressed,
     Lz4,
     Zstd,
 }
 
 /// A compression algorithm and level form one distinct encoding candidate.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EncodingCandidate {
     pub algorithm: CompressionAlgorithm,
     pub level: Option<i32>,
 }
 
+pub const DEFAULT_ENCODING_CANDIDATES: [EncodingCandidate; 7] = [
+    EncodingCandidate {
+        algorithm: CompressionAlgorithm::Uncompressed,
+        level: None,
+    },
+    EncodingCandidate {
+        algorithm: CompressionAlgorithm::Lz4,
+        level: None,
+    },
+    EncodingCandidate {
+        algorithm: CompressionAlgorithm::Zstd,
+        level: Some(1),
+    },
+    EncodingCandidate {
+        algorithm: CompressionAlgorithm::Zstd,
+        level: Some(3),
+    },
+    EncodingCandidate {
+        algorithm: CompressionAlgorithm::Zstd,
+        level: Some(6),
+    },
+    EncodingCandidate {
+        algorithm: CompressionAlgorithm::Zstd,
+        level: Some(9),
+    },
+    EncodingCandidate {
+        algorithm: CompressionAlgorithm::Zstd,
+        level: Some(12),
+    },
+];
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompressionMeasurement {
+    pub candidate: EncodingCandidate,
+    pub sample_rows: u64,
+    pub encoded_bytes: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CandidateScore {
     pub candidate: EncodingCandidate,
-    pub estimated_bytes_lower: u64,
-    pub estimated_bytes_upper: u64,
+    pub sample_rows: u64,
+    pub encoded_bytes: u64,
     pub consideration_factor: f64,
     pub decoding_penalty: f64,
     pub effective_score: f64,

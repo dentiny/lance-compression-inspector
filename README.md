@@ -5,15 +5,15 @@ Inspect a Lance dataset snapshot and identify compression opportunities.
 The workspace separates the reusable analysis library from presentation:
 
 - `lance-compression-estimation`: footer probing, report models, rules, and
-  savings ranges. Probe and estimation remain separate Rust modules.
+  measured sample comparisons. Probe and estimation remain separate Rust modules.
 - `lance-compression-cli`: human and versioned JSON reports.
 
 Lance leaves general ZSTD/LZ4 compression disabled by default. This tool treats
-that as a valid baseline, not an error. For sufficiently large columns it
-scores LZ4 and several `(ZSTD, level)` candidates independently and labels
-metadata-only savings ranges as low-confidence heuristics.
+that as a valid baseline, not an error. It re-encodes a bounded row sample with
+LZ4 and several `(ZSTD, level)` candidates in parallel, then compares measured
+per-column bytes.
 
-Ranking uses estimated bytes by default. `--consider-decoding-penalty` enables
+Ranking uses measured sample bytes by default. `--consider-decoding-penalty` enables
 DuckDB-inspired consideration and decode-cost factors; these remain explicit in
 the report rather than being folded into an unexplained recommendation.
 
@@ -33,10 +33,13 @@ misclassified.
 ```console
 cargo run -- path/to/dataset.lance
 cargo run -- path/to/dataset.lance --branch main --version 3
+cargo run -- path/to/dataset.lance --sample-rows 32768
 cargo run -- path/to/dataset.lance --consider-decoding-penalty
 cargo run -- path/to/dataset.lance --output json
 ```
 
 The default snapshot is the latest version on the main branch. The probe reads
 the selected manifest and only inspects active fragment and overlay data files.
-It does not rewrite data.
+By default it samples at most 16,384 visible rows per fragment—not per file,
+page, or row group. Each candidate rewrite uses temporary local data and does
+not mutate the source dataset.

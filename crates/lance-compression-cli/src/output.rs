@@ -62,10 +62,10 @@ fn print_file(report: &AnalysisReport) {
         }
         for score in &suggestion.candidate_scores {
             println!(
-                "    score {}: bytes {}–{}, consideration {:.2}, decode {:.2}, effective {:.0}",
+                "    score {}: {} bytes / {} sampled rows, consideration {:.2}, decode {:.2}, effective {:.0}",
                 candidate_name(score.candidate),
-                score.estimated_bytes_lower,
-                score.estimated_bytes_upper,
+                score.encoded_bytes,
+                score.sample_rows,
                 score.consideration_factor,
                 score.decoding_penalty,
                 score.effective_score

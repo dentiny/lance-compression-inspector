@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use lance_compression_estimation::{
-    AnalyzeOptions, analyze_dataset_with_options, probe::probe_local_dataset,
+    AnalyzeOptions, DEFAULT_SAMPLE_ROWS, analyze_dataset_with_options, probe::probe_local_dataset,
 };
 
 #[derive(Debug, Parser)]
@@ -25,6 +25,10 @@ struct Args {
     #[arg(long)]
     version: Option<u64>,
 
+    /// Maximum visible rows sampled per fragment for each compression candidate.
+    #[arg(long, default_value_t = DEFAULT_SAMPLE_ROWS)]
+    sample_rows: usize,
+
     /// Include decode-cost multipliers when ranking compression candidates.
     #[arg(long)]
     consider_decoding_penalty: bool,
@@ -43,7 +47,8 @@ enum Output {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let probe = probe_local_dataset(&args.dataset, &args.branch, args.version).await?;
+    let probe =
+        probe_local_dataset(&args.dataset, &args.branch, args.version, args.sample_rows).await?;
     let report = analyze_dataset_with_options(
         probe,
         AnalyzeOptions {
