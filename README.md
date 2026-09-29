@@ -101,13 +101,31 @@ is `S3`, `GCS`, or `AZBLOB`; for example, `OPENDAL_S3_REGION`,
 native discovery. The dataset URI always determines the bucket/container and
 path, regardless of environment options for `root`, `bucket`, or `container`.
 
-For OCI Object Storage, use the S3 compatibility endpoint and an OCI Customer
-Secret Key pair in the standard AWS environment variables:
+### Required environment variables for S3 and OCI
+
+For private buckets using access-key authentication, configure these variables
+in the shell that launches the CLI:
+
+| Variable | Requirement | Purpose |
+|---|---|---|
+| `AWS_ENDPOINT_URL` | Required for OCI and other S3-compatible services; optional for AWS S3 | S3 API endpoint, including `https://` (or `http://` for a local test server) |
+| `AWS_REGION` | Set to the bucket's region | Signing region; for example, `us-phoenix-1` for OCI |
+| `AWS_ACCESS_KEY_ID` | Required for access-key authentication | AWS access key ID, or OCI Customer Secret Key access key |
+| `AWS_SECRET_ACCESS_KEY` | Required for access-key authentication | Secret paired with the access key |
+| `AWS_SESSION_TOKEN` | Only for temporary credentials that require a session token | Session token; omit for an OCI Customer Secret Key pair |
+
+For OCI, use the **S3 compatibility endpoint**, including your namespace, and
+an **OCI Customer Secret Key pair**. An OCI CLI login/security token or API
+signing private key does not replace this pair. No storage CLI flags or `.env`
+file loading are provided; variables must already be exported to the process.
+
+Complete OCI example (replace the placeholders with your own values):
 
 ```bash
 export AWS_ENDPOINT_URL="https://<namespace>.compat.objectstorage.<region>.oraclecloud.com"
 export AWS_REGION="<region>"
-# Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in your environment.
+export AWS_ACCESS_KEY_ID="<oci-customer-access-key>"
+export AWS_SECRET_ACCESS_KEY="<oci-customer-secret-key>"
 cargo run -- s3://<bucket>/<dataset-path> --sample-rows 32
 ```
 
