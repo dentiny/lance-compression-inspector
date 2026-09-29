@@ -54,16 +54,34 @@ fn check_column(
         });
     }
 
-    let current_measurement = column
-        .encoding_measurements
-        .iter()
-        .find(|measurement| is_baseline(measurement.plan))?;
+    let source_version = encoding_file_version(&probe.file_version)?;
+    let target_version = encoding_target_version(source_version);
+    let source_measurement = column.encoding_measurements.iter().find(|measurement| {
+        is_baseline(measurement.plan) && measurement.plan.file_version == source_version
+    })?;
+    let target_baseline = column.encoding_measurements.iter().find(|measurement| {
+        is_baseline(measurement.plan) && measurement.plan.file_version == target_version
+    })?;
+    let target_column_bytes = project_bytes(
+        column.on_disk_bytes,
+        target_baseline.encoded_bytes,
+        source_measurement.encoded_bytes,
+    );
+    let target_file_bytes = projected_file_for_version(probe, source_version, target_version)?;
 
     let mut candidate_scores = column
         .encoding_measurements
         .iter()
+        .filter(|measurement| measurement.plan.file_version == target_version)
         .map(|measurement| {
-            score_candidate(probe, column, current_measurement, measurement, options)
+            score_candidate(
+                column,
+                target_baseline,
+                target_column_bytes,
+                target_file_bytes,
+                measurement,
+                options,
+            )
         })
         .collect::<Vec<_>>();
     candidate_scores.sort_by(|left, right| {
@@ -72,18 +90,16 @@ fn check_column(
             .unwrap_or(Ordering::Equal)
     });
     let winner = candidate_scores[0].plan;
-    if current_measurement.plan == winner {
+    if target_baseline.plan == winner {
         return None;
     }
 
     let winner_score = candidate_scores[0].clone();
     let estimate = {
-        let saved = probe
-            .file_size_bytes
-            .saturating_sub(winner_score.projected_file_bytes);
+        let saved = target_file_bytes.saturating_sub(winner_score.projected_file_bytes);
         let percent = saved
             .saturating_mul(100)
-            .checked_div(probe.file_size_bytes)
+            .checked_div(target_file_bytes)
             .unwrap_or(0)
             .min(100) as u8;
         Some(SavingsEstimate {
@@ -94,8 +110,9 @@ fn check_column(
             lower_percent: percent,
             upper_percent: percent,
             caveat: format!(
-                "Projected from {} sampled rows using the current encoding as baseline; distributions and fixed overhead may differ across the remaining rows.",
-                winner_score.sample_rows
+                "Encoding-only gain projected from {} sampled rows within format {}; format migration is reported separately.",
+                winner_score.sample_rows,
+                version_name(target_version)
             ),
         })
     };
@@ -118,8 +135,8 @@ fn check_column(
         estimate,
         candidate_scores,
         evidence: vec![
-            format!("{} current on-disk bytes", column.on_disk_bytes),
-            format!("{} current file bytes", probe.file_size_bytes),
+            format!("{} format-baseline column bytes", target_column_bytes),
+            format!("{} format-baseline file bytes", target_file_bytes),
             format!(
                 "{} rows were independently re-encoded for each candidate",
                 winner_score.sample_rows
@@ -128,24 +145,23 @@ fn check_column(
     })
 }
 
-/// Project one candidate from its sampled size to full column and file sizes.
-/// The current encoding's sample-to-full ratio is the baseline; optional
-/// policy factors affect ranking only and remain separately visible.
+/// Project one candidate within a fixed target format. Format migration is
+/// intentionally excluded; optional policy factors affect ranking only.
 fn score_candidate(
-    probe: &ProbeReport,
     column: &ColumnProfile,
-    current: &EncodingMeasurement,
+    target_baseline: &EncodingMeasurement,
+    target_column_bytes: u64,
+    target_file_bytes: u64,
     measurement: &EncodingMeasurement,
     options: AnalyzeOptions,
 ) -> CandidateScore {
     let projected_column_bytes = project_bytes(
-        column.on_disk_bytes,
+        target_column_bytes,
         measurement.encoded_bytes,
-        current.encoded_bytes,
+        target_baseline.encoded_bytes,
     );
-    let projected_file_bytes = probe
-        .file_size_bytes
-        .saturating_sub(column.on_disk_bytes)
+    let projected_file_bytes = target_file_bytes
+        .saturating_sub(target_column_bytes)
         .saturating_add(projected_column_bytes);
     let consideration_factor = consideration_factor(column, measurement.plan);
     let decoding_penalty = if options.consider_decoding_penalty {
@@ -157,6 +173,7 @@ fn score_candidate(
         plan: measurement.plan,
         sample_rows: measurement.sample_rows,
         encoded_bytes: measurement.encoded_bytes,
+        resolved_encoding_tags: measurement.resolved_encoding_tags.clone(),
         projected_column_bytes,
         projected_file_bytes,
         consideration_factor,
@@ -180,6 +197,68 @@ fn is_baseline(plan: EncodingPlan) -> bool {
     plan.structural == StructuralEncoding::Auto
         && plan.value == ValueEncoding::Auto
         && plan.general == GeneralCompression::Baseline
+}
+
+fn encoding_file_version(version: &str) -> Option<EncodingFileVersion> {
+    match version {
+        "0.1" | "V1" => Some(EncodingFileVersion::V1),
+        "2.0" | "V2_0" => Some(EncodingFileVersion::V2_0),
+        "2.1" | "V2_1" => Some(EncodingFileVersion::V2_1),
+        "2.2" | "V2_2" => Some(EncodingFileVersion::V2_2),
+        "2.3" | "V2_3" => Some(EncodingFileVersion::V2_3),
+        _ => None,
+    }
+}
+
+fn encoding_target_version(source: EncodingFileVersion) -> EncodingFileVersion {
+    match source {
+        EncodingFileVersion::V1
+        | EncodingFileVersion::V2_0
+        | EncodingFileVersion::V2_1
+        | EncodingFileVersion::V2_2 => EncodingFileVersion::V2_2,
+        EncodingFileVersion::V2_3 => EncodingFileVersion::V2_3,
+    }
+}
+
+fn projected_file_for_version(
+    probe: &ProbeReport,
+    source: EncodingFileVersion,
+    target: EncodingFileVersion,
+) -> Option<u64> {
+    let current_column_bytes = probe
+        .columns
+        .iter()
+        .map(|column| column.on_disk_bytes)
+        .sum::<u64>();
+    let fixed_overhead = probe.file_size_bytes.saturating_sub(current_column_bytes);
+    probe
+        .columns
+        .iter()
+        .try_fold(fixed_overhead, |total, column| {
+            let source_measurement = column
+                .encoding_measurements
+                .iter()
+                .find(|measurement| measurement.plan == EncodingPlan::baseline(source))?;
+            let target_measurement = column
+                .encoding_measurements
+                .iter()
+                .find(|measurement| measurement.plan == EncodingPlan::baseline(target))?;
+            Some(total.saturating_add(project_bytes(
+                column.on_disk_bytes,
+                target_measurement.encoded_bytes,
+                source_measurement.encoded_bytes,
+            )))
+        })
+}
+
+fn version_name(version: EncodingFileVersion) -> &'static str {
+    match version {
+        EncodingFileVersion::V1 => "0.1",
+        EncodingFileVersion::V2_0 => "2.0",
+        EncodingFileVersion::V2_1 => "2.1",
+        EncodingFileVersion::V2_2 => "2.2",
+        EncodingFileVersion::V2_3 => "2.3",
+    }
 }
 
 fn consideration_factor(column: &ColumnProfile, plan: EncodingPlan) -> f64 {
@@ -226,6 +305,9 @@ fn plan_name(plan: EncodingPlan) -> String {
         GeneralCompression::Zstd { level } => format!("zstd:{level}"),
     };
     let version = match plan.file_version {
+        EncodingFileVersion::V1 => "0.1",
+        EncodingFileVersion::V2_0 => "2.0",
+        EncodingFileVersion::V2_1 => "2.1",
         EncodingFileVersion::V2_2 => "2.2",
         EncodingFileVersion::V2_3 => "2.3",
     };
@@ -284,6 +366,7 @@ mod tests {
                 plan,
                 sample_rows: 1_024,
                 encoded_bytes: [baseline_bytes, 80, 70, 60, 55, 52, 50][index],
+                resolved_encoding_tags: BTreeSet::new(),
             })
             .collect();
         ProbeReport {
@@ -341,9 +424,10 @@ mod tests {
         let baseline = &column.encoding_measurements[0];
         let candidate = &column.encoding_measurements[1];
         let score = score_candidate(
-            &probe,
             column,
             baseline,
+            column.on_disk_bytes,
+            probe.file_size_bytes,
             candidate,
             AnalyzeOptions::default(),
         );

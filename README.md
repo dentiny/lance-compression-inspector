@@ -51,6 +51,7 @@ cargo run -- path/to/dataset.lance
 cargo run -- path/to/dataset.lance --branch main --version 3
 cargo run -- path/to/dataset.lance --sample-rows 32768
 cargo run -- path/to/dataset.lance --consider-decoding-penalty
+cargo run -- path/to/dataset.lance --verbose
 cargo run -- path/to/dataset.lance --output json
 ```
 

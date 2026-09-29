@@ -132,6 +132,8 @@ pub enum Action {
     RewriteFileVersion {
         target: String,
         capabilities: Vec<String>,
+        projected_file_bytes: Option<u64>,
+        size_delta_bytes: Option<i64>,
     },
     InspectUnknownEncoding,
 }
@@ -175,6 +177,12 @@ pub enum GeneralCompression {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum EncodingFileVersion {
+    #[serde(rename = "0.1")]
+    V1,
+    #[serde(rename = "2.0")]
+    V2_0,
+    #[serde(rename = "2.1")]
+    V2_1,
     #[serde(rename = "2.2")]
     V2_2,
     #[serde(rename = "2.3")]
@@ -206,6 +214,8 @@ pub struct EncodingMeasurement {
     pub plan: EncodingPlan,
     pub sample_rows: u64,
     pub encoded_bytes: u64,
+    /// Encodings actually selected by the Lance writer for this sample.
+    pub resolved_encoding_tags: BTreeSet<EncodingTag>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -213,6 +223,7 @@ pub struct CandidateScore {
     pub plan: EncodingPlan,
     pub sample_rows: u64,
     pub encoded_bytes: u64,
+    pub resolved_encoding_tags: BTreeSet<EncodingTag>,
     pub projected_column_bytes: u64,
     pub projected_file_bytes: u64,
     pub consideration_factor: f64,

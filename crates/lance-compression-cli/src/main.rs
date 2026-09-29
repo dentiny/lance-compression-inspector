@@ -33,6 +33,10 @@ struct Args {
     #[arg(long)]
     consider_decoding_penalty: bool,
 
+    /// Show every measured plan, score, and evidence item.
+    #[arg(long)]
+    verbose: bool,
+
     /// Report format.
     #[arg(long, value_enum, default_value_t = Output::Human)]
     output: Output,
@@ -56,7 +60,7 @@ async fn main() -> Result<()> {
         },
     );
     match args.output {
-        Output::Human => output::print_human(&report),
+        Output::Human => output::print_human(&report, args.verbose),
         Output::Json => println!("{}", serde_json::to_string_pretty(&report)?),
     }
     Ok(())

@@ -134,6 +134,13 @@ async fn attach_sample_measurements(
         // General compression is available in 2.2+. For older source files,
         // compare all codec candidates under the stable 2.2 writer so the
         // relative codec ratio is meaningful.
+        let source_plan_version = match file_version {
+            ConcreteFileVersion::V1 => EncodingFileVersion::V1,
+            ConcreteFileVersion::V2_0 => EncodingFileVersion::V2_0,
+            ConcreteFileVersion::V2_1 => EncodingFileVersion::V2_1,
+            ConcreteFileVersion::V2_2 => EncodingFileVersion::V2_2,
+            ConcreteFileVersion::V2_3 => EncodingFileVersion::V2_3,
+        };
         let plan_version = match file_version {
             ConcreteFileVersion::V1 | ConcreteFileVersion::V2_0 | ConcreteFileVersion::V2_1 => {
                 EncodingFileVersion::V2_2
@@ -159,7 +166,13 @@ async fn attach_sample_measurements(
         // general compressors. Rewrites within each stage remain parallel.
         for field in schema.fields() {
             let path = field.name().to_string();
-            let stage_one = candidate_plans_for_type(field.data_type(), plan_version);
+            let mut stage_one = candidate_plans_for_type(field.data_type(), plan_version);
+            for baseline_version in [source_plan_version, EncodingFileVersion::V2_3] {
+                let baseline = EncodingPlan::baseline(baseline_version);
+                if !stage_one.contains(&baseline) {
+                    stage_one.push(baseline);
+                }
+            }
             let mut measurements = try_join_all(stage_one.iter().copied().map(|plan| {
                 measure_candidate(
                     batches.clone(),
@@ -387,6 +400,9 @@ fn supports_dictionary(data_type: &DataType) -> bool {
 
 fn file_version_for_plan(plan: EncodingPlan) -> LanceFileVersion {
     match plan.file_version {
+        EncodingFileVersion::V1 => LanceFileVersion::Legacy,
+        EncodingFileVersion::V2_0 => LanceFileVersion::V2_0,
+        EncodingFileVersion::V2_1 => LanceFileVersion::V2_1,
         EncodingFileVersion::V2_2 => LanceFileVersion::V2_2,
         EncodingFileVersion::V2_3 => LanceFileVersion::V2_3,
     }
@@ -424,16 +440,16 @@ async fn measure_candidate(
         dataset_path.join("data").join(&data_file.path)
     };
     let report = probe_local_file(data_path).await?;
-    let encoded_bytes = report
+    let column = report
         .columns
         .iter()
         .find(|column| column.path == target_path)
-        .map(|column| column.on_disk_bytes)
         .with_context(|| format!("sample rewrite omitted target column {target_path}"))?;
     Ok(EncodingMeasurement {
         plan,
         sample_rows,
-        encoded_bytes,
+        encoded_bytes: column.on_disk_bytes,
+        resolved_encoding_tags: column.encoding_tags.clone(),
     })
 }
 

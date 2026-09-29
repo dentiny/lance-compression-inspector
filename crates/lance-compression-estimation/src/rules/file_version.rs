@@ -1,4 +1,7 @@
-use crate::model::{Action, EncodingTag, Location, ProbeReport, Severity, Suggestion};
+use crate::model::{
+    Action, EncodingFileVersion, EncodingPlan, EncodingTag, Location, ProbeReport, Severity,
+    Suggestion,
+};
 
 pub(crate) fn check(probe: &ProbeReport) -> Vec<Suggestion> {
     let mut suggestions = Vec::new();
@@ -12,9 +15,15 @@ pub(crate) fn check(probe: &ProbeReport) -> Vec<Suggestion> {
             "larger-miniblocks".into(),
             "variable-packed-struct".into(),
         ];
+        let projection = projected_file_size(probe, EncodingFileVersion::V2_2);
+        let delta = projection.map(|projected| signed_delta(probe, projected));
         suggestions.push(Suggestion {
             rule: "file-version-upgrade".into(),
-            severity: Severity::Suggestion,
+            severity: if delta.is_some_and(|delta| delta > 0) {
+                Severity::Suggestion
+            } else {
+                Severity::Info
+            },
             location: Location::File,
             message: format!(
                 "File version {} predates Lance 2.2 encoding improvements; benchmark a rewrite to the current stable 2.2 format.",
@@ -23,6 +32,8 @@ pub(crate) fn check(probe: &ProbeReport) -> Vec<Suggestion> {
             action: Action::RewriteFileVersion {
                 target: "2.2".into(),
                 capabilities: capabilities.clone(),
+                projected_file_bytes: projection,
+                size_delta_bytes: delta,
             },
             estimate: None,
             candidate_scores: vec![],
@@ -45,6 +56,7 @@ pub(crate) fn check(probe: &ProbeReport) -> Vec<Suggestion> {
 }
 
 fn experimental_v2_3_suggestion(probe: &ProbeReport) -> Suggestion {
+    let projection = projected_file_size(probe, EncodingFileVersion::V2_3);
     let structural_candidates = probe
         .columns
         .iter()
@@ -84,10 +96,68 @@ fn experimental_v2_3_suggestion(probe: &ProbeReport) -> Suggestion {
         action: Action::RewriteFileVersion {
             target: "2.3 (next/unstable)".into(),
             capabilities: vec!["sparse-structural-layout".into()],
+            projected_file_bytes: projection,
+            size_delta_bytes: projection.map(|projected| signed_delta(probe, projected)),
         },
         estimate: None,
         candidate_scores: vec![],
         evidence,
+    }
+}
+
+fn projected_file_size(probe: &ProbeReport, target: EncodingFileVersion) -> Option<u64> {
+    let source = encoding_file_version(&probe.file_version)?;
+    let current_column_bytes = probe
+        .columns
+        .iter()
+        .map(|column| column.on_disk_bytes)
+        .sum::<u64>();
+    let fixed_overhead = probe.file_size_bytes.saturating_sub(current_column_bytes);
+    probe
+        .columns
+        .iter()
+        .try_fold(fixed_overhead, |total, column| {
+            let current = column
+                .encoding_measurements
+                .iter()
+                .find(|measurement| measurement.plan == EncodingPlan::baseline(source))?;
+            let target = column
+                .encoding_measurements
+                .iter()
+                .find(|measurement| measurement.plan == EncodingPlan::baseline(target))?;
+            let projected = project_bytes(
+                column.on_disk_bytes,
+                target.encoded_bytes,
+                current.encoded_bytes,
+            );
+            Some(total.saturating_add(projected))
+        })
+}
+
+fn project_bytes(full_bytes: u64, target_sample_bytes: u64, current_sample_bytes: u64) -> u64 {
+    if current_sample_bytes == 0 {
+        return full_bytes;
+    }
+    let projected = u128::from(full_bytes)
+        .saturating_mul(u128::from(target_sample_bytes))
+        .checked_div(u128::from(current_sample_bytes))
+        .unwrap_or(u128::from(full_bytes));
+    projected.min(u128::from(u64::MAX)) as u64
+}
+
+fn signed_delta(probe: &ProbeReport, projected: u64) -> i64 {
+    let delta = i128::from(probe.file_size_bytes) - i128::from(projected);
+    delta.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+}
+
+fn encoding_file_version(version: &str) -> Option<EncodingFileVersion> {
+    match version {
+        "0.1" | "V1" => Some(EncodingFileVersion::V1),
+        "2.0" | "V2_0" => Some(EncodingFileVersion::V2_0),
+        "2.1" | "V2_1" => Some(EncodingFileVersion::V2_1),
+        "2.2" | "V2_2" => Some(EncodingFileVersion::V2_2),
+        "2.3" | "V2_3" => Some(EncodingFileVersion::V2_3),
+        _ => None,
     }
 }
 
