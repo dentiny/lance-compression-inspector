@@ -2822,7 +2822,6 @@ dependencies = [
  "async-trait",
  "lance",
  "lance-core",
- "lance-encoding",
  "lance-file",
  "lance-io",
  "object_store 0.14.2",

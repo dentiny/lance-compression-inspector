@@ -1,6 +1,6 @@
 //! Type-aware structural/value encoding candidates and their field metadata.
 
-use super::compression_candidates::{compression_candidate_plans, with_compression_field};
+use super::compression_candidates::{apply_compression, compression_candidate_plans};
 use super::type_utils::{fixed_bit_width, supports_dictionary};
 use crate::{
     EncodingFileVersion, EncodingMeasurement, EncodingPlan, GeneralCompression, StructuralEncoding,
@@ -114,26 +114,16 @@ pub(super) fn combined_candidate_plans(measurements: &[EncodingMeasurement]) -> 
         if plan.value == ValueEncoding::Fsst {
             continue;
         }
-        let generals: &[GeneralCompression] = if plan.value == ValueEncoding::ByteStreamSplit {
-            &[
-                GeneralCompression::Lz4,
-                GeneralCompression::Zstd { level: 3 },
-                GeneralCompression::Zstd { level: 9 },
-            ]
-        } else {
-            &[
-                GeneralCompression::None,
-                GeneralCompression::Lz4,
-                GeneralCompression::Zstd { level: 3 },
-                GeneralCompression::Zstd { level: 9 },
-            ]
-        };
-        plans.extend(
-            generals
-                .iter()
-                .copied()
-                .map(|general| EncodingPlan { general, ..plan }),
-        );
+        for general in [
+            GeneralCompression::None,
+            GeneralCompression::Lz4,
+            GeneralCompression::Zstd { level: 3 },
+            GeneralCompression::Zstd { level: 9 },
+        ] {
+            if plan.value != ValueEncoding::ByteStreamSplit || general != GeneralCompression::None {
+                plans.push(EncodingPlan { general, ..plan });
+            }
+        }
     }
     plans.sort();
     plans.dedup();
@@ -142,58 +132,39 @@ pub(super) fn combined_candidate_plans(measurements: &[EncodingMeasurement]) -> 
 
 pub(super) fn with_candidate_field(field: &ArrowField, plan: EncodingPlan) -> ArrowField {
     let mut metadata = field.metadata().clone();
-    match plan.structural {
-        StructuralEncoding::Auto => {}
-        StructuralEncoding::MiniBlock => {
-            metadata.insert(
-                "lance-encoding:structural-encoding".into(),
-                "miniblock".into(),
-            );
-        }
-        StructuralEncoding::FullZip => {
-            metadata.insert(
-                "lance-encoding:structural-encoding".into(),
-                "fullzip".into(),
-            );
-        }
-        StructuralEncoding::Sparse => {
-            metadata.insert("lance-encoding:structural-encoding".into(), "sparse".into());
-        }
+    if plan.structural != StructuralEncoding::Auto {
+        metadata.insert(
+            "lance-encoding:structural-encoding".into(),
+            plan.structural.to_string(),
+        );
     }
     if plan.value != ValueEncoding::Auto {
         for key in [
-            "lance-encoding:rle-threshold",
-            "lance-encoding:bss",
-            "lance-encoding:dict-divisor",
-            "lance-encoding:dict-size-ratio",
-            "lance-encoding:packed",
+            "rle-threshold",
+            "bss",
+            "dict-divisor",
+            "dict-size-ratio",
+            "packed",
         ] {
-            metadata.remove(key);
+            metadata.remove(&format!("lance-encoding:{key}"));
         }
     }
-    match plan.value {
-        ValueEncoding::Auto => {}
-        ValueEncoding::Rle => {
-            metadata.insert("lance-encoding:rle-threshold".into(), "1.0".into());
-            metadata.insert("lance-encoding:bss".into(), "off".into());
-        }
+    let controls: &[(&str, &str)] = match plan.value {
+        ValueEncoding::Auto => &[],
+        ValueEncoding::Rle => &[("rle-threshold", "1.0"), ("bss", "off")],
         ValueEncoding::Fsst => {
-            metadata.insert("lance-encoding:compression".into(), "fsst".into());
             metadata.remove("lance-encoding:compression-level");
+            &[("compression", "fsst")]
         }
-        ValueEncoding::ByteStreamSplit => {
-            metadata.insert("lance-encoding:bss".into(), "on".into());
-            metadata.insert("lance-encoding:rle-threshold".into(), "0".into());
-        }
-        ValueEncoding::Dictionary => {
-            metadata.insert("lance-encoding:dict-divisor".into(), "1".into());
-            metadata.insert("lance-encoding:dict-size-ratio".into(), "1.0".into());
-        }
-        ValueEncoding::PackedStruct => {
-            metadata.insert("lance-encoding:packed".into(), "true".into());
-        }
+        ValueEncoding::ByteStreamSplit => &[("bss", "on"), ("rle-threshold", "0")],
+        ValueEncoding::Dictionary => &[("dict-divisor", "1"), ("dict-size-ratio", "1.0")],
+        ValueEncoding::PackedStruct => &[("packed", "true")],
+    };
+    for (key, value) in controls {
+        metadata.insert(format!("lance-encoding:{key}"), (*value).into());
     }
-    with_compression_field(&field.clone().with_metadata(metadata), plan.general)
+    apply_compression(&mut metadata, plan.general);
+    field.clone().with_metadata(metadata)
 }
 
 #[cfg(test)]

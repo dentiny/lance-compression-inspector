@@ -1,6 +1,5 @@
 use lance_compression_estimation::{
-    Action, AnalysisReport, DatasetAnalysisReport, EncodingFileVersion, EncodingPlan,
-    GeneralCompression, Location, StructuralEncoding, Suggestion, ValueEncoding,
+    Action, AnalysisReport, DatasetAnalysisReport, Location, Suggestion,
 };
 
 pub fn print_human(report: &DatasetAnalysisReport, verbose: bool) {
@@ -38,11 +37,6 @@ fn print_file(report: &AnalysisReport, verbose: bool) {
             print_encodings(&column.raw_page_encodings);
         }
     }
-    if report.suggestions.is_empty() {
-        println!("  No recommended changes.");
-        return;
-    }
-
     let visible = report
         .suggestions
         .iter()
@@ -55,26 +49,14 @@ fn print_file(report: &AnalysisReport, verbose: bool) {
         println!("  No recommended changes.");
         return;
     }
-    let format_suggestions = visible
-        .iter()
-        .copied()
-        .filter(|suggestion| matches!(suggestion.action, Action::RewriteFileVersion { .. }))
-        .collect::<Vec<_>>();
-    print_format_table(&format_suggestions);
+    print_format_table(&visible);
     for suggestion in visible.iter().copied().filter(|suggestion| {
         suggestion.candidate_scores.is_empty()
             && !matches!(suggestion.action, Action::RewriteFileVersion { .. })
     }) {
         print_non_plan_conclusion(suggestion);
     }
-    print_plan_table(
-        report,
-        &visible
-            .iter()
-            .copied()
-            .filter(|suggestion| !suggestion.candidate_scores.is_empty())
-            .collect::<Vec<_>>(),
-    );
+    print_plan_table(report, &visible);
     if verbose {
         for suggestion in visible {
             print_details(suggestion);
@@ -101,18 +83,10 @@ fn print_non_plan_conclusion(suggestion: &Suggestion) {
     };
     let severity = format!("{:?}", suggestion.severity).to_uppercase();
 
-    match &suggestion.action {
-        Action::RewriteFileVersion { .. } => {}
-        Action::ProbeEncodingPlans { .. } => {
-            println!("  [{severity}] {location}: {}", suggestion.message);
-        }
-    }
+    println!("  [{severity}] {location}: {}", suggestion.message);
 }
 
 fn print_format_table(suggestions: &[&Suggestion]) {
-    if suggestions.is_empty() {
-        return;
-    }
     let headers = [
         "TARGET",
         "STATUS",
@@ -151,14 +125,10 @@ fn print_format_table(suggestions: &[&Suggestion]) {
             ])
         })
         .collect::<Vec<_>>();
-    println!("\n  FORMAT CHANGES");
-    print_table(&headers, &rows);
+    print_table("FORMAT CHANGES", &headers, &rows);
 }
 
 fn print_plan_table(report: &AnalysisReport, suggestions: &[&Suggestion]) {
-    if suggestions.is_empty() {
-        return;
-    }
     let headers = [
         "COLUMN",
         "CURRENT ENCODING",
@@ -195,8 +165,7 @@ fn print_plan_table(report: &AnalysisReport, suggestions: &[&Suggestion]) {
             ])
         })
         .collect::<Vec<_>>();
-    println!("\n  ENCODING CHANGES");
-    print_table(&headers, &rows);
+    print_table("ENCODING CHANGES", &headers, &rows);
 }
 
 // Compare with the original file, including the format migration cost.
@@ -224,7 +193,10 @@ fn print_encodings(encodings: &[String]) {
     }
 }
 
-fn print_table(headers: &[&str], rows: &[Vec<String>]) {
+fn print_table(title: &str, headers: &[&str], rows: &[Vec<String>]) {
+    if rows.is_empty() {
+        return;
+    }
     let widths = headers
         .iter()
         .enumerate()
@@ -242,26 +214,21 @@ fn print_table(headers: &[&str], rows: &[Vec<String>]) {
         .map(|width| "-".repeat(*width))
         .collect::<Vec<_>>()
         .join("-+-");
-    println!();
-    println!(
-        "  {}",
-        headers
-            .iter()
-            .enumerate()
-            .map(|(index, value)| format!("{value:<width$}", width = widths[index]))
-            .collect::<Vec<_>>()
-            .join(" | ")
-    );
-    println!("  {separator}");
-    for row in rows {
+    let print_row = |row: &[&str]| {
         println!(
             "  {}",
             row.iter()
-                .enumerate()
-                .map(|(index, value)| format!("{value:<width$}", width = widths[index]))
+                .zip(&widths)
+                .map(|(value, width)| format!("{value:<width$}"))
                 .collect::<Vec<_>>()
                 .join(" | ")
-        );
+        )
+    };
+    println!("\n  {title}\n");
+    print_row(headers);
+    println!("  {separator}");
+    for row in rows {
+        print_row(&row.iter().map(String::as_str).collect::<Vec<_>>());
     }
 }
 
@@ -272,7 +239,7 @@ fn print_details(suggestion: &Suggestion) {
             "    plans: {}",
             plans
                 .iter()
-                .map(|plan| plan_name(*plan))
+                .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(", ")
         );
@@ -280,7 +247,7 @@ fn print_details(suggestion: &Suggestion) {
     for score in &suggestion.candidate_scores {
         println!(
             "    score {}: sample={}B/{} rows, column={}, file={}, decode={:.2}, effective={:.0}",
-            plan_name(score.plan),
+            score.plan,
             score.encoded_bytes,
             score.sample_rows,
             human_bytes(score.projected_column_bytes),
@@ -296,42 +263,6 @@ fn print_details(suggestion: &Suggestion) {
     for evidence in &suggestion.evidence {
         println!("    evidence: {evidence}");
     }
-}
-
-fn plan_name(plan: EncodingPlan) -> String {
-    let (structural, value, general, version) = plan_parts(plan);
-    format!("{structural}/{value}/{general}/v{version}")
-}
-
-fn plan_parts(plan: EncodingPlan) -> (&'static str, &'static str, String, &'static str) {
-    let structural = match plan.structural {
-        StructuralEncoding::Auto => "auto",
-        StructuralEncoding::MiniBlock => "miniblock",
-        StructuralEncoding::FullZip => "fullzip",
-        StructuralEncoding::Sparse => "sparse",
-    };
-    let value = match plan.value {
-        ValueEncoding::Auto => "auto",
-        ValueEncoding::Rle => "rle",
-        ValueEncoding::Fsst => "fsst",
-        ValueEncoding::ByteStreamSplit => "bss",
-        ValueEncoding::Dictionary => "dictionary",
-        ValueEncoding::PackedStruct => "packed-struct",
-    };
-    let general = match plan.general {
-        GeneralCompression::Baseline => "baseline".into(),
-        GeneralCompression::None => "none".into(),
-        GeneralCompression::Lz4 => "lz4".into(),
-        GeneralCompression::Zstd { level } => format!("zstd:{level}"),
-    };
-    let version = match plan.file_version {
-        EncodingFileVersion::V1 => "0.1",
-        EncodingFileVersion::V2_0 => "2.0",
-        EncodingFileVersion::V2_1 => "2.1",
-        EncodingFileVersion::V2_2 => "2.2",
-        EncodingFileVersion::V2_3 => "2.3",
-    };
-    (structural, value, general, version)
 }
 
 fn human_bytes(bytes: u64) -> String {

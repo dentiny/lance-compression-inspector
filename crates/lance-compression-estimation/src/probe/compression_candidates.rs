@@ -1,7 +1,7 @@
 //! General compression candidates and their field metadata.
 
 use crate::{EncodingFileVersion, EncodingPlan, GeneralCompression};
-use arrow_schema::Field as ArrowField;
+use std::collections::HashMap;
 
 /// Generate the baseline and general compression plans for a target format.
 pub(super) fn compression_candidate_plans(file_version: EncodingFileVersion) -> Vec<EncodingPlan> {
@@ -13,8 +13,6 @@ pub(super) fn compression_candidate_plans(file_version: EncodingFileVersion) -> 
             ..baseline
         }),
     );
-    plans.sort();
-    plans.dedup();
     plans
 }
 
@@ -30,25 +28,20 @@ fn generate_compression_candicates() -> [GeneralCompression; 7] {
     ]
 }
 
-pub(super) fn with_compression_field(
-    field: &ArrowField,
+pub(super) fn apply_compression(
+    metadata: &mut HashMap<String, String>,
     general: GeneralCompression,
-) -> ArrowField {
-    let mut metadata = field.metadata().clone();
-    match general {
-        GeneralCompression::Baseline => {}
-        GeneralCompression::None => {
-            metadata.insert("lance-encoding:compression".into(), "none".into());
-            metadata.remove("lance-encoding:compression-level");
-        }
-        GeneralCompression::Lz4 => {
-            metadata.insert("lance-encoding:compression".into(), "lz4".into());
-            metadata.remove("lance-encoding:compression-level");
-        }
-        GeneralCompression::Zstd { level } => {
-            metadata.insert("lance-encoding:compression".into(), "zstd".into());
-            metadata.insert("lance-encoding:compression-level".into(), level.to_string());
-        }
+) {
+    let codec = match general {
+        GeneralCompression::Baseline => return,
+        GeneralCompression::None => "none",
+        GeneralCompression::Lz4 => "lz4",
+        GeneralCompression::Zstd { .. } => "zstd",
+    };
+    metadata.insert("lance-encoding:compression".into(), codec.into());
+    if let GeneralCompression::Zstd { level } = general {
+        metadata.insert("lance-encoding:compression-level".into(), level.to_string());
+    } else {
+        metadata.remove("lance-encoding:compression-level");
     }
-    field.clone().with_metadata(metadata)
 }

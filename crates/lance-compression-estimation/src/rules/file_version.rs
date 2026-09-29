@@ -1,6 +1,5 @@
-use crate::model::{
-    Action, EncodingFileVersion, EncodingPlan, Location, ProbeReport, Severity, Suggestion,
-};
+use super::projection::projected_file_size;
+use crate::model::{Action, EncodingFileVersion, Location, ProbeReport, Severity, Suggestion};
 
 const V2_2_CAPABILITIES: &[&str] = &[
     "constant-layout",
@@ -72,53 +71,6 @@ fn upgrade_suggestion(
             capabilities.join(", ")
         )],
     }
-}
-
-/// Estimate file size in `target` format with unchanged writer controls.
-/// Scale each column's current bytes by target/current baseline sample bytes,
-/// then add the existing non-column overhead unchanged.
-/// Keep Blob bytes unchanged; return None if a non-Blob column lacks a baseline.
-/// A zero-byte current baseline keeps that column's size unchanged.
-fn projected_file_size(probe: &ProbeReport, target: EncodingFileVersion) -> Option<u64> {
-    let fixed_overhead = probe.file_size_bytes.saturating_sub(
-        probe
-            .columns
-            .iter()
-            .map(|column| column.on_disk_bytes)
-            .sum(),
-    );
-    probe
-        .columns
-        .iter()
-        .try_fold(fixed_overhead, |total, column| {
-            // Blob bytes stay unchanged; Blob columns have no candidate measurements.
-            if column.has_blob {
-                return Some(total.saturating_add(column.on_disk_bytes));
-            }
-            let current = baseline_bytes(column, probe.file_version)?;
-            let target = baseline_bytes(column, target)?;
-            Some(total.saturating_add(project_bytes(column.on_disk_bytes, target, current)))
-        })
-}
-
-fn baseline_bytes(
-    column: &crate::model::ColumnProfile,
-    version: EncodingFileVersion,
-) -> Option<u64> {
-    column
-        .encoding_measurements
-        .iter()
-        .find(|measurement| measurement.plan == EncodingPlan::baseline(version))
-        .map(|measurement| measurement.encoded_bytes)
-}
-
-fn project_bytes(full_bytes: u64, target_sample_bytes: u64, current_sample_bytes: u64) -> u64 {
-    if current_sample_bytes == 0 {
-        return full_bytes;
-    }
-    let projected = u128::from(full_bytes).saturating_mul(u128::from(target_sample_bytes))
-        / u128::from(current_sample_bytes);
-    projected.min(u128::from(u64::MAX)) as u64
 }
 
 fn signed_delta(current: u64, projected: u64) -> i64 {

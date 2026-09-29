@@ -257,6 +257,51 @@ impl EncodingPlan {
     }
 }
 
+impl std::fmt::Display for StructuralEncoding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Auto => "auto",
+            Self::MiniBlock => "miniblock",
+            Self::FullZip => "fullzip",
+            Self::Sparse => "sparse",
+        })
+    }
+}
+
+impl std::fmt::Display for ValueEncoding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Auto => "auto",
+            Self::Rle => "rle",
+            Self::Fsst => "fsst",
+            Self::ByteStreamSplit => "bss",
+            Self::Dictionary => "dictionary",
+            Self::PackedStruct => "packed-struct",
+        })
+    }
+}
+
+impl std::fmt::Display for GeneralCompression {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Baseline => f.write_str("baseline"),
+            Self::None => f.write_str("none"),
+            Self::Lz4 => f.write_str("lz4"),
+            Self::Zstd { level } => write!(f, "zstd:{level}"),
+        }
+    }
+}
+
+impl std::fmt::Display for EncodingPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}/{}/{}/v{}",
+            self.structural, self.value, self.general, self.file_version
+        )
+    }
+}
+
 /// Observed result of rewriting one bounded sample with a requested encoding plan.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EncodingMeasurement {
