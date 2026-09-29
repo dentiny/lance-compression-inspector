@@ -89,11 +89,8 @@ AWS_REGION=us-east-1 cargo run -- s3://my-bucket/dataset.lance
 AWS_ENDPOINT_URL=http://localhost:9000 AWS_REGION=us-east-1 cargo run -- s3://my-bucket/dataset.lance
 ```
 
-OpenDAL uses its native AWS credential discovery. Backend options can also be
-supplied as `OPENDAL_S3_<OPTION>`, for example, `OPENDAL_S3_REGION` or
-`OPENDAL_S3_ENDPOINT`. These explicit options take precedence over native
-discovery. The dataset URI always determines the bucket and path, regardless
-of environment options for `root` or `bucket`.
+OpenDAL reads endpoint, region, and credentials directly from the standard
+AWS environment variables below. The dataset URI determines the bucket and path.
 
 ### Required environment variables for S3
 

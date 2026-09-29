@@ -1,6 +1,6 @@
 //! Open remote datasets through OpenDAL's object_store adapter.
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use lance::{dataset::builder::DatasetBuilder, session::Session};
@@ -13,19 +13,17 @@ use url::Url;
 
 /// OpenDAL owns remote I/O; Lance still resolves manifests and decodes data.
 #[derive(Debug)]
-struct OpenDalProvider {
-    store: Arc<dyn object_store::ObjectStore>,
-}
+struct S3Provider(Arc<OpendalStore>);
 
 #[async_trait::async_trait]
-impl ObjectStoreProvider for OpenDalProvider {
+impl ObjectStoreProvider for S3Provider {
     async fn new_store(
         &self,
         location: Url,
         params: &ObjectStoreParams,
     ) -> lance_core::Result<ObjectStore> {
         Ok(ObjectStore::new(
-            self.store.clone(),
+            self.0.clone(),
             location,
             params.block_size,
             None,
@@ -54,9 +52,10 @@ pub(super) fn dataset_builder(source: &str) -> Result<(String, DatasetBuilder)> 
         || uri.password().is_some()
         || uri.query().is_some()
         || uri.fragment().is_some()
+        || uri.port().is_some()
     {
         bail!(
-            "dataset URI must not contain credentials, query parameters, or fragments; use environment variables"
+            "configure credentials and endpoints through environment variables; URI must contain only the dataset location"
         );
     }
     if uri.scheme() == "file" {
@@ -65,37 +64,20 @@ pub(super) fn dataset_builder(source: &str) -> Result<(String, DatasetBuilder)> 
             .map_err(|_| anyhow::anyhow!("invalid file URI"))?;
         return dataset_builder(path.to_str().context("dataset path is not valid UTF-8")?);
     }
-    let bucket = uri
-        .host_str()
-        .context("dataset URI must include a bucket")?;
-    if uri.port().is_some() {
-        bail!("configure the endpoint through environment variables");
-    }
     if uri.scheme() != "s3" {
         bail!(
             "unsupported dataset scheme {}; use s3:// or a local path",
             uri.scheme()
         );
     }
-    // Backend options come from OPENDAL_S3_<OPTION>.
-    let mut options: HashMap<String, String> = std::env::vars()
-        .filter_map(|(key, value)| {
-            key.strip_prefix("OPENDAL_S3_")
-                .map(|key| (key.to_ascii_lowercase(), value))
-        })
-        .collect();
-    // The URI always determines the location, even if these options exist in env.
-    // Keep the operator rooted at the bucket: Lance passes bucket-relative paths.
-    options.insert("root".into(), "/".into());
+    let bucket = uri.host_str().context("S3 URI must include a bucket")?;
+    // OpenDAL reads endpoint, region, and credentials from AWS_* variables.
     opendal::install_default();
-    options.insert("bucket".into(), bucket.into());
-    let operator = Operator::from_iter::<services::S3>(options)?;
+    let operator = Operator::new(services::S3::default().bucket(bucket))?;
     let session = Arc::new(Session::default());
     session.store_registry().insert(
-        uri.scheme(),
-        Arc::new(OpenDalProvider {
-            store: Arc::new(OpendalStore::new(operator)),
-        }),
+        "s3",
+        Arc::new(S3Provider(Arc::new(OpendalStore::new(operator)))),
     );
     Ok((
         source.trim_end_matches('/').to_owned(),
