@@ -615,6 +615,18 @@ pub async fn probe_local_file(source: impl AsRef<FsPath>) -> Result<ProbeReport>
             if encoding_tags.is_empty() {
                 encoding_tags.insert(EncodingTag::Unknown);
             }
+            let page_bytes = physical_columns
+                .iter()
+                .flat_map(|column| &column.pages)
+                .flat_map(|page| page.buffer_sizes.iter())
+                .sum::<u64>();
+            // Dictionaries and other shared data may live in column-level
+            // buffers instead of page buffers; both contribute to column size.
+            let column_buffer_bytes = physical_infos
+                .iter()
+                .flat_map(|column| column.buffer_offsets_and_sizes.iter())
+                .map(|(_, size)| *size)
+                .sum::<u64>();
             ColumnProfile {
                 index,
                 path: field.name.clone(),
@@ -623,18 +635,7 @@ pub async fn probe_local_file(source: impl AsRef<FsPath>) -> Result<ProbeReport>
                     .iter()
                     .map(|column| column.pages.len())
                     .sum(),
-                on_disk_bytes: physical_columns
-                    .iter()
-                    .flat_map(|column| &column.pages)
-                    .flat_map(|page| page.buffer_sizes.iter())
-                    .sum::<u64>()
-                    .saturating_add(
-                        physical_infos
-                            .iter()
-                            .flat_map(|column| column.buffer_offsets_and_sizes.iter())
-                            .map(|(_, size)| *size)
-                            .sum(),
-                    ),
+                on_disk_bytes: page_bytes.saturating_add(column_buffer_bytes),
                 field_metadata: field.metadata.clone().into_iter().collect(),
                 encoding_tags,
                 encoding_measurements: vec![],
