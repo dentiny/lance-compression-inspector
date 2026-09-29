@@ -25,7 +25,7 @@ struct Args {
     #[arg(long)]
     version: Option<u64>,
 
-    /// Maximum visible rows sampled per fragment for each encoding plan.
+    /// Maximum physical rows sampled per active data file for each encoding plan.
     #[arg(long, default_value_t = DEFAULT_SAMPLE_ROWS)]
     sample_rows: usize,
 

@@ -2665,8 +2665,10 @@ dependencies = [
  "futures",
  "lance",
  "lance-core",
+ "lance-encoding",
  "lance-file",
  "lance-io",
+ "rand 0.9.5",
  "serde",
  "tempfile",
 ]

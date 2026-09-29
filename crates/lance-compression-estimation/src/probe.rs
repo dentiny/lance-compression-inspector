@@ -4,27 +4,27 @@
 //! never silently discarded. Normalized tags are additive and power the
 //! estimator's current capability matrix.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::Path as FsPath,
-    sync::Arc,
-};
+use std::{collections::BTreeSet, path::Path as FsPath, sync::Arc};
 
 use anyhow::{Context, Result};
-use arrow_array::{RecordBatch, RecordBatchIterator};
+use arrow_array::{RecordBatch, RecordBatchIterator, UInt32Array};
 use arrow_schema::{DataType, Field as ArrowField, Schema as ArrowSchema};
-use futures::future::try_join_all;
+use futures::{TryStreamExt, future::try_join_all};
 use lance::{
     Dataset,
     dataset::{WriteParams, builder::DatasetBuilder},
 };
-use lance_file::reader::{FileReader, describe_encoding};
-use lance_file::version::{ConcreteFileVersion, LanceFileVersion};
+use lance_core::cache::LanceCache;
+use lance_encoding::decoder::{DecoderPlugins, FilterExpression};
+use lance_file::reader::{FileReader, FileReaderOptions, describe_encoding};
+use lance_file::version::LanceFileVersion;
 use lance_io::{
+    ReadBatchParams,
     object_store::ObjectStore,
     scheduler::{ScanScheduler, SchedulerConfig},
     utils::CachedFileSize,
 };
+use rand::seq::index;
 
 use crate::{
     ColumnProfile, DatasetProbeReport, EncodingFileVersion, EncodingMeasurement, EncodingPlan,
@@ -85,11 +85,11 @@ pub async fn probe_local_dataset(
         } else {
             canonical.join("data").join(relative_path)
         };
-        files.push(probe_local_file(data_path).await?);
-    }
-
-    if sample_rows > 0 {
-        attach_sample_measurements(&dataset, sample_rows, &mut files).await?;
+        let mut report = probe_local_file(&data_path).await?;
+        if sample_rows > 0 {
+            attach_data_file_measurements(&data_path, sample_rows, &mut report).await?;
+        }
+        files.push(report);
     }
 
     Ok(DatasetProbeReport {
@@ -106,126 +106,139 @@ pub async fn probe_local_dataset(
     })
 }
 
-async fn attach_sample_measurements(
-    dataset: &Dataset,
+async fn attach_data_file_measurements(
+    data_path: &FsPath,
     sample_rows: usize,
-    files: &mut [ProbeReport],
+    report: &mut ProbeReport,
 ) -> Result<()> {
-    // Sample each fragment independently so one fragment's distribution is
-    // never used to recommend settings for another fragment's physical files.
-    for fragment in dataset.iter_fragments() {
-        let mut file_versions = fragment
-            .referenced_lance_files()
-            .map(|file| {
-                ConcreteFileVersion::from_data_file_numbers(
-                    file.file_major_version,
-                    file.file_minor_version,
-                )
-            })
-            .collect::<lance_core::Result<Vec<_>>>()?;
-        file_versions.sort_by_key(|version| version.to_manifest_string());
-        file_versions.dedup();
-        let [file_version] = file_versions.as_slice() else {
-            anyhow::bail!(
-                "fragment {} contains mixed Lance file versions; per-file sampling is required",
-                fragment.id
-            );
-        };
-        // General compression is available in 2.2+. For older source files,
-        // compare all codec candidates under the stable 2.2 writer so the
-        // relative codec ratio is meaningful.
-        let source_plan_version = match file_version {
-            ConcreteFileVersion::V1 => EncodingFileVersion::V1,
-            ConcreteFileVersion::V2_0 => EncodingFileVersion::V2_0,
-            ConcreteFileVersion::V2_1 => EncodingFileVersion::V2_1,
-            ConcreteFileVersion::V2_2 => EncodingFileVersion::V2_2,
-            ConcreteFileVersion::V2_3 => EncodingFileVersion::V2_3,
-        };
-        let plan_version = match file_version {
-            ConcreteFileVersion::V1 | ConcreteFileVersion::V2_0 | ConcreteFileVersion::V2_1 => {
-                EncodingFileVersion::V2_2
-            }
-            ConcreteFileVersion::V2_2 => EncodingFileVersion::V2_2,
-            ConcreteFileVersion::V2_3 => EncodingFileVersion::V2_3,
-        };
-        let fragment_id =
-            u32::try_from(fragment.id).context("fragment ID exceeds Lance's u32 sampling limit")?;
-        let batch = dataset
-            .sample(sample_rows, dataset.schema(), Some(&[fragment_id]))
-            .await?;
-        if batch.num_rows() == 0 {
-            continue;
+    let source_plan_version = parse_encoding_file_version(&report.file_version)
+        .with_context(|| format!("unsupported Lance file version {}", report.file_version))?;
+    if source_plan_version == EncodingFileVersion::V1 {
+        return Ok(());
+    }
+    let plan_version = match source_plan_version {
+        EncodingFileVersion::V1 | EncodingFileVersion::V2_0 | EncodingFileVersion::V2_1 => {
+            EncodingFileVersion::V2_2
         }
-        let measured_rows = batch.num_rows() as u64;
-        let schema = batch.schema();
-        let batches = vec![batch];
-        let mut measurements_by_path = BTreeMap::new();
+        version => version,
+    };
+    let batches = sample_data_file(data_path, sample_rows).await?;
+    if batches.is_empty() {
+        return Ok(());
+    }
+    let measured_rows = batches.iter().map(RecordBatch::num_rows).sum::<usize>() as u64;
+    let schema = batches[0].schema();
 
-        // The bounded policy runs one axis sweep, keeps the best structural and
-        // value plan, and then combines only that small beam with representative
-        // general compressors. Rewrites within each stage remain parallel.
-        for field in schema.fields() {
-            let path = field.name().to_string();
-            let mut stage_one = candidate_plans_for_type(field.data_type(), plan_version);
-            for baseline_version in [source_plan_version, EncodingFileVersion::V2_3] {
-                let baseline = EncodingPlan::baseline(baseline_version);
-                if !stage_one.contains(&baseline) {
-                    stage_one.push(baseline);
-                }
+    // The bounded policy runs one axis sweep, keeps the best structural and
+    // value plan, and then combines only that small beam with representative
+    // general compressors. Rewrites within each stage remain parallel.
+    for field in schema.fields() {
+        let path = field.name().to_string();
+        let mut stage_one = candidate_plans_for_type(field.data_type(), plan_version);
+        for baseline_version in [source_plan_version, EncodingFileVersion::V2_3] {
+            let baseline = EncodingPlan::baseline(baseline_version);
+            if !stage_one.contains(&baseline) {
+                stage_one.push(baseline);
             }
-            let mut measurements = try_join_all(stage_one.iter().copied().map(|plan| {
-                measure_candidate(
-                    batches.clone(),
-                    path.clone(),
-                    plan,
-                    measured_rows,
-                    file_version_for_plan(plan),
-                )
-            }))
-            .await?;
-
-            let stage_two = combined_candidate_plans(&measurements);
-            let measured_plans = measurements
-                .iter()
-                .map(|measurement| measurement.plan)
-                .collect::<BTreeSet<_>>();
-            let stage_two = stage_two
-                .into_iter()
-                .filter(|plan| !measured_plans.contains(plan))
-                .collect::<Vec<_>>();
-            measurements.extend(
-                try_join_all(stage_two.into_iter().map(|plan| {
-                    measure_candidate(
-                        batches.clone(),
-                        path.clone(),
-                        plan,
-                        measured_rows,
-                        file_version_for_plan(plan),
-                    )
-                }))
-                .await?,
-            );
-            measurements_by_path.insert(path, measurements);
         }
-        let fragment_paths = fragment
-            .referenced_lance_files()
-            .map(|data_file| data_file.path.as_str())
-            .collect::<Vec<_>>();
+        let mut measurements = try_join_all(stage_one.iter().copied().map(|plan| {
+            measure_candidate(
+                batches.clone(),
+                path.clone(),
+                plan,
+                measured_rows,
+                file_version_for_plan(plan),
+            )
+        }))
+        .await?;
 
-        for file in files.iter_mut().filter(|file| {
-            fragment_paths
-                .iter()
-                .any(|path| file.source.ends_with(path))
-        }) {
-            for column in &mut file.columns {
-                column.encoding_measurements = measurements_by_path
-                    .get(&column.path)
-                    .cloned()
-                    .unwrap_or_default();
-            }
+        let stage_two = combined_candidate_plans(&measurements);
+        let measured_plans = measurements
+            .iter()
+            .map(|measurement| measurement.plan)
+            .collect::<BTreeSet<_>>();
+        measurements.extend(
+            try_join_all(
+                stage_two
+                    .into_iter()
+                    .filter(|plan| !measured_plans.contains(plan))
+                    .map(|plan| {
+                        measure_candidate(
+                            batches.clone(),
+                            path.clone(),
+                            plan,
+                            measured_rows,
+                            file_version_for_plan(plan),
+                        )
+                    }),
+            )
+            .await?,
+        );
+        if let Some(column) = report.columns.iter_mut().find(|column| column.path == path) {
+            column.encoding_measurements = measurements;
         }
     }
     Ok(())
+}
+
+async fn sample_data_file(data_path: &FsPath, sample_rows: usize) -> Result<Vec<RecordBatch>> {
+    let canonical = data_path
+        .canonicalize()
+        .with_context(|| format!("cannot resolve {}", data_path.display()))?;
+    let uri = canonical
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("data file path is not valid UTF-8"))?;
+    let (store, object_path) = ObjectStore::from_uri(uri).await?;
+    let scheduler = ScanScheduler::new(store, SchedulerConfig::new(256 * 1024 * 1024));
+    let file_scheduler = scheduler
+        .open_file(&object_path, &CachedFileSize::unknown())
+        .await?;
+    let cache = LanceCache::no_cache();
+    let reader = FileReader::try_open(
+        file_scheduler,
+        None,
+        Arc::<DecoderPlugins>::default(),
+        &cache,
+        FileReaderOptions::default(),
+    )
+    .await?;
+    let row_count = usize::try_from(reader.num_rows())
+        .context("data file row count exceeds platform limits")?;
+    let sample_size = sample_rows.min(row_count);
+    if sample_size == 0 {
+        return Ok(vec![]);
+    }
+    if row_count > u32::MAX as usize {
+        anyhow::bail!("data file has more than u32::MAX rows and cannot use indexed sampling");
+    }
+    let mut indices = index::sample(&mut rand::rng(), row_count, sample_size)
+        .into_vec()
+        .into_iter()
+        .map(|index| index as u32)
+        .collect::<Vec<_>>();
+    indices.sort_unstable();
+    reader
+        .read_stream(
+            ReadBatchParams::Indices(UInt32Array::from(indices)),
+            1024,
+            16,
+            FilterExpression::no_filter(),
+        )
+        .await?
+        .try_collect()
+        .await
+        .map_err(Into::into)
+}
+
+fn parse_encoding_file_version(version: &str) -> Option<EncodingFileVersion> {
+    match version {
+        "0.1" | "V1" => Some(EncodingFileVersion::V1),
+        "2.0" | "V2_0" => Some(EncodingFileVersion::V2_0),
+        "2.1" | "V2_1" => Some(EncodingFileVersion::V2_1),
+        "2.2" | "V2_2" => Some(EncodingFileVersion::V2_2),
+        "2.3" | "V2_3" => Some(EncodingFileVersion::V2_3),
+        _ => None,
+    }
 }
 
 /// Generate the independent axis sweep for a top-level Arrow field.
