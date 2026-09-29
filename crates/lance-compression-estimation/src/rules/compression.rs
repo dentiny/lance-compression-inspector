@@ -1,17 +1,21 @@
 use std::cmp::Ordering;
 
+use rayon::prelude::*;
+
 use crate::model::{
     Action, AnalyzeOptions, CandidateScore, ColumnProfile, Confidence, EncodingFileVersion,
     EncodingMeasurement, EncodingPlan, EncodingTag, EstimateBasis, GeneralCompression, Location,
     ProbeReport, SavingsEstimate, Severity, StructuralEncoding, Suggestion, ValueEncoding,
 };
 
-/// Evaluate measured structural, value, and general encoding plans for every
-/// top-level logical column in a probed Lance data file.
-pub(crate) fn check(probe: &ProbeReport, options: AnalyzeOptions) -> Vec<Suggestion> {
+/// Evaluate measured encoding plans for all top-level columns in parallel.
+pub(crate) fn evaluate_encoding_plans(
+    probe: &ProbeReport,
+    options: AnalyzeOptions,
+) -> Vec<Suggestion> {
     probe
         .columns
-        .iter()
+        .par_iter()
         .filter_map(|column| check_column(probe, column, options))
         .collect()
 }
@@ -394,7 +398,7 @@ mod tests {
 
     #[test]
     fn measured_bytes_select_high_compression_without_penalty() {
-        let suggestions = check(&report(100), AnalyzeOptions::default());
+        let suggestions = evaluate_encoding_plans(&report(100), AnalyzeOptions::default());
         assert_eq!(
             suggestions[0].candidate_scores[0].plan.general,
             GeneralCompression::Zstd { level: 12 }
@@ -413,7 +417,7 @@ mod tests {
 
     #[test]
     fn decoding_penalty_changes_the_winning_level() {
-        let suggestions = check(
+        let suggestions = evaluate_encoding_plans(
             &report(100),
             AnalyzeOptions {
                 consider_decoding_penalty: true,
@@ -432,7 +436,7 @@ mod tests {
             .encoding_tags
             .insert(EncodingTag::Dictionary);
 
-        let default_scores = check(&probe, AnalyzeOptions::default());
+        let default_scores = evaluate_encoding_plans(&probe, AnalyzeOptions::default());
         assert!(
             default_scores[0]
                 .candidate_scores
@@ -440,7 +444,7 @@ mod tests {
                 .all(|score| score.consideration_factor == 1.0)
         );
 
-        let policy_scores = check(
+        let policy_scores = evaluate_encoding_plans(
             &probe,
             AnalyzeOptions {
                 consider_decoding_penalty: true,
@@ -474,7 +478,7 @@ mod tests {
 
     #[test]
     fn current_winner_emits_no_suggestion() {
-        let suggestions = check(&report(40), AnalyzeOptions::default());
+        let suggestions = evaluate_encoding_plans(&report(40), AnalyzeOptions::default());
         assert!(suggestions.is_empty());
     }
 
@@ -482,7 +486,7 @@ mod tests {
     fn score_identifies_full_plan() {
         let mut probe = report(100);
         probe.columns[0].encoding_measurements[1].plan.structural = StructuralEncoding::FullZip;
-        let suggestions = check(&probe, AnalyzeOptions::default());
+        let suggestions = evaluate_encoding_plans(&probe, AnalyzeOptions::default());
         assert!(
             suggestions[0]
                 .candidate_scores

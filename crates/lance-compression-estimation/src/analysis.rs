@@ -35,6 +35,6 @@ pub fn analyze(probe: ProbeReport) -> AnalysisReport {
 
 pub fn analyze_with_options(probe: ProbeReport, options: AnalyzeOptions) -> AnalysisReport {
     let mut suggestions = rules::file_version::check(&probe);
-    suggestions.extend(rules::compression::check(&probe, options));
+    suggestions.extend(rules::compression::evaluate_encoding_plans(&probe, options));
     AnalysisReport { probe, suggestions }
 }
