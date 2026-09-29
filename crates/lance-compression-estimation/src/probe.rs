@@ -3,8 +3,18 @@
 //! Encoding descriptions come directly from Lance and are preserved for
 //! reporting. Sampling and scoring do not depend on a custom encoding taxonomy.
 
+mod compression_candidates;
 mod sampling;
 
+/// Generate general compression candidates for a top-level field.
+pub fn candidate_plans_for_type(
+    _data_type: &arrow_schema::DataType,
+    file_version: EncodingFileVersion,
+) -> Vec<crate::EncodingPlan> {
+    compression_candidates::compression_candidate_plans(file_version)
+}
+
+use sampling::attach_data_file_measurements;
 pub use sampling::sample_dataset;
 
 use std::{collections::BTreeSet, path::Path as FsPath};
@@ -30,6 +40,7 @@ pub async fn probe_local_dataset(
     source: impl AsRef<FsPath>,
     branch: &str,
     version: Option<u64>,
+    sample_rows: usize,
 ) -> Result<DatasetProbeReport> {
     let source = source.as_ref();
     let canonical = source
@@ -69,6 +80,11 @@ pub async fn probe_local_dataset(
         }
     }
 
+    let sample = if sample_rows > 0 {
+        Some(sample_dataset(&dataset, sample_rows).await?)
+    } else {
+        None
+    };
     let mut files = Vec::with_capacity(relative_paths.len());
     for relative_path in relative_paths {
         let root_relative = canonical.join(&relative_path);
@@ -77,7 +93,11 @@ pub async fn probe_local_dataset(
         } else {
             canonical.join("data").join(relative_path)
         };
-        files.push(probe_local_file(&data_path).await?);
+        let mut report = probe_local_file(&data_path).await?;
+        if let Some(sample) = &sample {
+            attach_data_file_measurements(sample, &mut report).await?;
+        }
+        files.push(report);
     }
 
     Ok(DatasetProbeReport {
