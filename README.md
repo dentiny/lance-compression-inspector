@@ -35,8 +35,9 @@ It changes ranking only; projected sizes remain based on measured bytes.
 File format capabilities are version-aware. Files older than the current stable
 2.2 format can receive a rewrite suggestion for constant layouts, larger
 miniblocks, and variable packed structs. The unstable 2.3 sparse layout is
-also considered as a separate experimental recommendation, without a savings
-estimate until null/empty-list density can be measured.
+also considered as a separate experimental recommendation. When baseline
+sample measurements are available, format recommendations include projected
+file size and the estimated gain or cost.
 
 Page-encoding descriptions come directly from Lance and are preserved without
 a custom tag taxonomy. JSON and `--verbose` include both source and sampled
@@ -69,3 +70,43 @@ selected snapshot. The same dataset sample is reused for per-file candidate
 evaluation, so estimates reflect the sampled dataset distribution rather than
 each file’s individual row distribution. Deleted rows are excluded by Lance.
 Candidate rewrites use temporary local data and do not mutate the source dataset.
+
+## Example: committed test dataset
+
+Run the inspector on the fixture without regenerating it:
+
+```console
+cargo run --locked -- testdata/suboptimal.lance
+```
+
+The following results were captured on 2026-09-29 using merged commit
+`bb9f1c5`, the default 16,384-row dataset sample, and size-only ranking
+(the decode-cost penalty was disabled). The fixture has 100,000 rows, five
+columns, and one 56.58 MiB data file in format 2.1. The CLI completed successfully
+in about 16.5 seconds in a local debug build, excluding compilation.
+
+Changing only the file format produced these estimates:
+
+| Target format | Projected file size | Change from the original file |
+| --- | ---: | ---: |
+| 2.2 | 56.61 MiB | 25.00 KiB larger |
+| 2.3 (experimental) | 56.61 MiB | 25.00 KiB larger |
+
+Within format 2.2, the default human report showed these encoding recommendations:
+
+| Column | Requested winning plan | Projected file size | Savings vs. format 2.2 baseline |
+| --- | --- | ---: | ---: |
+| `row_id` | `auto/auto/zstd:6/v2.2` | 55.95 MiB | 671.25 KiB (1%) |
+| `event_json` | `auto/auto/zstd:6/v2.2` | 41.32 MiB | 15.29 MiB (27%) |
+| `payload` | `auto/auto/zstd:12/v2.2` | 46.78 MiB | 9.83 MiB (17%) |
+
+Each row estimates changing **only that column** from the format 2.2 baseline;
+these are separate what-if results, not a combined rewrite result. The percentages
+are relative to the baseline file size, not the column size. The default report
+omits recommendations whose estimated file savings round down to 0%.
+
+These numbers extrapolate measured sample rewrites; the full source dataset was
+not rewritten. File-level overhead is held constant by the estimator. Sampling is
+random, so sizes and winning plans can vary between runs. Use `--verbose` to see
+candidate scores and Lance-native encoding descriptions, or `--output json` for
+machine-readable results.
