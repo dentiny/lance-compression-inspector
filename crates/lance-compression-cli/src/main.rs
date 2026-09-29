@@ -1,3 +1,4 @@
+mod encoding_display;
 mod output;
 
 use std::path::PathBuf;

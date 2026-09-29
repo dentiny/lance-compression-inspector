@@ -42,7 +42,10 @@ file size and the estimated gain or cost.
 Page-encoding descriptions come directly from Lance and are preserved without
 a custom tag taxonomy. JSON and `--verbose` include both source and sampled
 rewrite descriptions; distinct page encodings remain distinct. The summary
-table shows requested plans, which may differ from the writer's actual choices.
+table shows the current and suggested encodings observed in those descriptions.
+Automatic choices retain their requested mode as `auto(actual)`, for example
+`auto(miniblock) / auto(variable+flat) / zstd:6`. Codec levels come from the
+written metadata; a missing ZSTD level is labeled `level not recorded`.
 Blob columns are identified using Lance's schema metadata and excluded from
 compression recommendations.
 
@@ -79,11 +82,11 @@ Run the inspector on the fixture without regenerating it:
 cargo run --locked -- testdata/suboptimal.lance
 ```
 
-The following results were captured on 2026-09-29 using merged commit
-`bb9f1c5`, the default 16,384-row dataset sample, and size-only ranking
-(the decode-cost penalty was disabled). The fixture has 100,000 rows, five
-columns, and one 56.58 MiB data file in format 2.1. The CLI completed successfully
-in about 16.5 seconds in a local debug build, excluding compilation.
+The following results were captured on 2026-09-29 with the default 16,384-row
+dataset sample and size-only ranking (the decode-cost penalty was disabled).
+The fixture has 100,000 rows, five columns, and one 56.58 MiB data file in format
+2.1. The CLI completed in about 16.8 seconds in a local debug build, excluding
+compilation.
 
 Changing only the file format produced these estimates:
 
@@ -92,18 +95,28 @@ Changing only the file format produced these estimates:
 | 2.2 | 56.61 MiB | 25.00 KiB larger |
 | 2.3 (experimental) | 56.61 MiB | 25.00 KiB larger |
 
-Within format 2.2, the default human report showed these encoding recommendations:
+The encoding recommendations were:
 
-| Column | Requested winning plan | Projected file size | Savings vs. format 2.2 baseline |
-| --- | --- | ---: | ---: |
-| `row_id` | `auto/auto/zstd:6/v2.2` | 55.95 MiB | 671.25 KiB (1%) |
-| `event_json` | `auto/auto/zstd:6/v2.2` | 41.32 MiB | 15.29 MiB (27%) |
-| `payload` | `auto/auto/zstd:12/v2.2` | 46.78 MiB | 9.83 MiB (17%) |
+```text
+  COLUMN     | CURRENT ENCODING                 | SUGGESTED ENCODING                              | FORMAT    | PROJECTED FILE | SAVINGS
+  -----------+----------------------------------+-------------------------------------------------+-----------+----------------+----------------
+  row_id     | miniblock / flat / none          | auto(miniblock) / auto(bss+flat) / zstd:6       | 2.1 → 2.2 | 55.95 MiB      | 646.29 KiB (1%)
+  event_json | miniblock / variable+flat / none | auto(miniblock) / auto(variable+flat) / zstd:6  | 2.1 → 2.2 | 41.32 MiB      | 15.26 MiB (26%)
+  payload    | miniblock / variable+flat / none | auto(miniblock) / auto(variable+flat) / zstd:12 | 2.1 → 2.2 | 46.78 MiB      | 9.80 MiB (17%)
+```
 
-Each row estimates changing **only that column** from the format 2.2 baseline;
-these are separate what-if results, not a combined rewrite result. The percentages
-are relative to the baseline file size, not the column size. The default report
-omits recommendations whose estimated file savings round down to 0%.
+Encoding cells show `structural layout / value encoding / compression`.
+`auto(...)` identifies what Lance actually selected for an automatic setting;
+`baseline(...)`, when present, identifies the observed codec with existing writer
+controls preserved. The configured candidate plans remain available in verbose
+output, alongside the full native encoding descriptions.
+
+Each row estimates the displayed format change plus a change to **only that
+column**. `SAVINGS` compares the projected file with the original file, including
+the format migration cost; these separate what-if results are not a combined
+rewrite result. Percentages use the original file size, not the column size.
+The default table omits rows whose net file savings round down to 0%. JSON and
+verbose candidate estimates retain encoding-only savings within the target format.
 
 These numbers extrapolate measured sample rewrites; the full source dataset was
 not rewritten. File-level overhead is held constant by the estimator. Sampling is
