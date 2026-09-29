@@ -232,7 +232,8 @@ pub struct CandidateScore {
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AnalyzeOptions {
-    /// Include a decode-cost multiplier when ranking encoding candidates.
+    /// Include consideration and decode-cost factors when ranking plans.
+    /// When false, ranking uses projected bytes only.
     pub consider_decoding_penalty: bool,
 }
 

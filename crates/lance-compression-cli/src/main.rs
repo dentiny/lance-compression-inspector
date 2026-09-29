@@ -29,7 +29,7 @@ struct Args {
     #[arg(long, default_value_t = DEFAULT_SAMPLE_ROWS)]
     sample_rows: usize,
 
-    /// Include decode-cost multipliers when ranking encoding plans.
+    /// Include consideration and decode-cost factors when ranking plans.
     #[arg(long)]
     consider_decoding_penalty: bool,
 

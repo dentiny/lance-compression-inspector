@@ -3,56 +3,62 @@ use crate::model::{
     Suggestion,
 };
 
+/// Generate file-format upgrade suggestions from the probed file version and
+/// previously measured rewrite sizes.
+///
+/// Version 2.3 needs no upgrade, version 2.2 only gets the experimental 2.3
+/// option, and older versions are evaluated against both stable 2.2 and
+/// experimental 2.3.
 pub(crate) fn check(probe: &ProbeReport) -> Vec<Suggestion> {
-    let mut suggestions = Vec::new();
-
-    if matches!(
-        probe.file_version.as_str(),
-        "V1" | "V2_0" | "V2_1" | "0.1" | "2.0" | "2.1"
-    ) {
-        let capabilities = vec![
-            "constant-layout".into(),
-            "larger-miniblocks".into(),
-            "variable-packed-struct".into(),
-        ];
-        let projection = projected_file_size(probe, EncodingFileVersion::V2_2);
-        let delta = projection.map(|projected| signed_delta(probe, projected));
-        suggestions.push(Suggestion {
-            rule: "file-version-upgrade".into(),
-            severity: if delta.is_some_and(|delta| delta > 0) {
-                Severity::Suggestion
-            } else {
-                Severity::Info
-            },
-            location: Location::File,
-            message: format!(
-                "File version {} predates Lance 2.2 encoding improvements; benchmark a rewrite to the current stable 2.2 format.",
-                probe.file_version
-            ),
-            action: Action::RewriteFileVersion {
-                target: "2.2".into(),
-                capabilities: capabilities.clone(),
-                projected_file_bytes: projection,
-                size_delta_bytes: delta,
-            },
-            estimate: None,
-            candidate_scores: vec![],
-            evidence: vec![
-                format!("observed file version: {}", probe.file_version),
-                format!("new stable capabilities: {}", capabilities.join(", ")),
-                "2.2 is the stable/default format in lance-file 12.0.0".into(),
-            ],
-        });
+    let Some(version) = encoding_file_version(&probe.file_version) else {
+        return vec![];
+    };
+    if version == EncodingFileVersion::V2_3 {
+        return vec![];
     }
-
-    if matches!(
-        probe.file_version.as_str(),
-        "V1" | "V2_0" | "V2_1" | "V2_2" | "0.1" | "2.0" | "2.1" | "2.2"
-    ) {
-        suggestions.push(experimental_v2_3_suggestion(probe));
+    if version == EncodingFileVersion::V2_2 {
+        return vec![experimental_v2_3_suggestion(probe)];
     }
+    vec![
+        stable_v2_2_suggestion(probe),
+        experimental_v2_3_suggestion(probe),
+    ]
+}
 
-    suggestions
+fn stable_v2_2_suggestion(probe: &ProbeReport) -> Suggestion {
+    let capabilities = vec![
+        "constant-layout".into(),
+        "larger-miniblocks".into(),
+        "variable-packed-struct".into(),
+    ];
+    let projection = projected_file_size(probe, EncodingFileVersion::V2_2);
+    let delta = projection.map(|projected| signed_delta(probe, projected));
+    Suggestion {
+        rule: "file-version-upgrade".into(),
+        severity: if delta.is_some_and(|delta| delta > 0) {
+            Severity::Suggestion
+        } else {
+            Severity::Info
+        },
+        location: Location::File,
+        message: format!(
+            "File version {} predates Lance 2.2 encoding improvements; benchmark a rewrite to stable format 2.2.",
+            probe.file_version
+        ),
+        action: Action::RewriteFileVersion {
+            target: "2.2".into(),
+            capabilities: capabilities.clone(),
+            projected_file_bytes: projection,
+            size_delta_bytes: delta,
+        },
+        estimate: None,
+        candidate_scores: vec![],
+        evidence: vec![
+            format!("observed file version: {}", probe.file_version),
+            format!("new stable capabilities: {}", capabilities.join(", ")),
+            "2.2 is the stable/default target format".into(),
+        ],
+    }
 }
 
 fn experimental_v2_3_suggestion(probe: &ProbeReport) -> Suggestion {
@@ -75,7 +81,7 @@ fn experimental_v2_3_suggestion(probe: &ProbeReport) -> Suggestion {
     let mut evidence = vec![
         format!("observed file version: {}", probe.file_version),
         "2.3 adds sparse structural layout for sparse flat or nested pages".into(),
-        "2.3 is the next/unstable format in lance-file 12.0.0".into(),
+        "2.3 is the next/unstable target format".into(),
         "footer metadata does not expose null/empty-list density, so no savings estimate is assigned".into(),
     ];
     if !structural_candidates.is_empty() {

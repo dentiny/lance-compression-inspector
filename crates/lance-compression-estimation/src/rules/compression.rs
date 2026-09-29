@@ -117,7 +117,7 @@ fn check_column(
         })
     };
     let ranking_mode = if options.consider_decoding_penalty {
-        "projected column size plus decoding penalty"
+        "projected column size plus consideration/decode factors"
     } else {
         "projected column size"
     };
@@ -163,11 +163,13 @@ fn score_candidate(
     let projected_file_bytes = target_file_bytes
         .saturating_sub(target_column_bytes)
         .saturating_add(projected_column_bytes);
-    let consideration_factor = consideration_factor(column, measurement.plan);
-    let decoding_penalty = if options.consider_decoding_penalty {
-        decode_penalty(measurement.plan)
+    let (consideration_factor, decoding_penalty) = if options.consider_decoding_penalty {
+        (
+            consideration_factor(column, measurement.plan),
+            decode_penalty(measurement.plan),
+        )
     } else {
-        1.0
+        (1.0, 1.0)
     };
     CandidateScore {
         plan: measurement.plan,
@@ -401,6 +403,12 @@ mod tests {
             suggestions[0].estimate.as_ref().unwrap().basis,
             EstimateBasis::MeasuredProbe
         );
+        assert!(
+            suggestions[0]
+                .candidate_scores
+                .iter()
+                .all(|score| score.consideration_factor == 1.0 && score.decoding_penalty == 1.0)
+        );
     }
 
     #[test]
@@ -414,6 +422,35 @@ mod tests {
         assert_eq!(
             suggestions[0].candidate_scores[0].plan.general,
             GeneralCompression::Zstd { level: 3 }
+        );
+    }
+
+    #[test]
+    fn consideration_factor_requires_explicit_policy_flag() {
+        let mut probe = report(100);
+        probe.columns[0]
+            .encoding_tags
+            .insert(EncodingTag::Dictionary);
+
+        let default_scores = check(&probe, AnalyzeOptions::default());
+        assert!(
+            default_scores[0]
+                .candidate_scores
+                .iter()
+                .all(|score| score.consideration_factor == 1.0)
+        );
+
+        let policy_scores = check(
+            &probe,
+            AnalyzeOptions {
+                consider_decoding_penalty: true,
+            },
+        );
+        assert!(
+            policy_scores[0]
+                .candidate_scores
+                .iter()
+                .any(|score| { score.consideration_factor > 1.0 })
         );
     }
 
