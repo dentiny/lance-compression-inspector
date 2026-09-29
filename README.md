@@ -123,24 +123,6 @@ temporary storage. External data-file base paths remain unsupported.
 Snapshot selection (`--branch` and `--version`) works the same as for local
 datasets.
 
-### S3-compatible storage smoke test
-
-Validated on 2026-09-29 against an existing private WARC dataset through
-an S3-compatible endpoint, with configuration supplied through environment variables:
-
-| Check | Result |
-|---|---|
-| Snapshot | Main branch, version 2 |
-| Dataset | 63,523 rows, 7 Lance data files, 20 columns |
-| Sample | 32 live rows |
-| Candidate measurements | 2,751 across the 7 files |
-| Blob handling | Descriptor column inspected; excluded from candidate rewrites |
-| Runtime | 31.7 seconds, local debug build; exit code 0 |
-
-This exercises remote manifest discovery, sampling, footer reads, and local
-candidate rewrites. The 32-row sample is a connectivity and execution smoke test,
-not a representative compression benchmark.
-
 ## Example: committed test dataset
 
 Run the inspector on the fixture without regenerating it:
