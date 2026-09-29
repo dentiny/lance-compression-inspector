@@ -78,8 +78,7 @@ Candidate rewrites use temporary local data and do not mutate the source dataset
 
 Remote datasets use OpenDAL's `Operator` through
 `object_store_opendal::OpendalStore`. The same accessor handles manifest reads,
-dataset sampling, and data-file metadata. Supported URIs are
-`s3://bucket/path`, `gs://bucket/path`, and `az://container/path`.
+dataset sampling, and data-file metadata. Use `s3://bucket/path` for S3-compatible storage.
 Local paths and `file://` URIs are also supported.
 
 All backend configuration comes from environment variables. The CLI only
@@ -88,18 +87,13 @@ needs the dataset URI:
 ```console
 AWS_REGION=us-east-1 cargo run -- s3://my-bucket/dataset.lance
 AWS_ENDPOINT_URL=http://localhost:9000 AWS_REGION=us-east-1 cargo run -- s3://my-bucket/dataset.lance
-GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json cargo run -- gs://my-bucket/dataset.lance
-OPENDAL_AZBLOB_ENDPOINT=https://myaccount.blob.core.windows.net cargo run -- az://my-container/dataset.lance
 ```
 
-OpenDAL uses its native credential discovery, including AWS credential
-environment variables and Google's application credentials. Any OpenDAL backend
-option can also be supplied as `OPENDAL_<BACKEND>_<OPTION>`, where the backend
-is `S3`, `GCS`, or `AZBLOB`; for example, `OPENDAL_S3_REGION`,
-`OPENDAL_S3_ENDPOINT`, `OPENDAL_AZBLOB_ACCOUNT_NAME`, or
-`OPENDAL_AZBLOB_ACCOUNT_KEY`. These explicit options take precedence over
-native discovery. The dataset URI always determines the bucket/container and
-path, regardless of environment options for `root`, `bucket`, or `container`.
+OpenDAL uses its native AWS credential discovery. Backend options can also be
+supplied as `OPENDAL_S3_<OPTION>`, for example, `OPENDAL_S3_REGION` or
+`OPENDAL_S3_ENDPOINT`. These explicit options take precedence over native
+discovery. The dataset URI always determines the bucket and path, regardless
+of environment options for `root` or `bucket`.
 
 ### Required environment variables for S3
 
@@ -147,8 +141,7 @@ an S3-compatible endpoint, with configuration supplied through environment varia
 
 This exercises remote manifest discovery, sampling, footer reads, and local
 candidate rewrites. The 32-row sample is a connectivity and execution smoke test,
-not a representative compression benchmark. GCS and Azure have not been tested
-against live services.
+not a representative compression benchmark.
 
 ## Example: committed test dataset
 
