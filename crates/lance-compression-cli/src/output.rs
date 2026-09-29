@@ -48,10 +48,18 @@ fn print_file(report: &AnalysisReport, verbose: bool) {
         .iter()
         .filter(|suggestion| {
             verbose
-                || !suggestion
-                    .estimate
-                    .as_ref()
-                    .is_some_and(|estimate| estimate.lower_percent == 0)
+                || suggestion.candidate_scores.first().map_or_else(
+                    || {
+                        !suggestion
+                            .estimate
+                            .as_ref()
+                            .is_some_and(|estimate| estimate.lower_percent == 0)
+                    },
+                    |winner| {
+                        savings_percent(report.probe.file_size_bytes, winner.projected_file_bytes)
+                            > 0
+                    },
+                )
         })
         .collect::<Vec<_>>();
 
@@ -68,6 +76,7 @@ fn print_file(report: &AnalysisReport, verbose: bool) {
         print_non_plan_conclusion(suggestion);
     }
     print_plan_table(
+        report,
         &visible
             .iter()
             .copied()
@@ -142,14 +151,15 @@ fn print_format_table(suggestions: &[&Suggestion]) {
     print_table(&headers, &rows);
 }
 
-fn print_plan_table(suggestions: &[&Suggestion]) {
+fn print_plan_table(report: &AnalysisReport, suggestions: &[&Suggestion]) {
     if suggestions.is_empty() {
         return;
     }
     let headers = [
         "COLUMN",
-        "BASELINE PLAN",
-        "SUGGESTED PLAN",
+        "CURRENT ENCODING",
+        "SUGGESTED ENCODING",
+        "FORMAT",
         "PROJECTED FILE",
         "SAVINGS",
     ];
@@ -157,43 +167,50 @@ fn print_plan_table(suggestions: &[&Suggestion]) {
         .iter()
         .filter_map(|suggestion| {
             let winner = suggestion.candidate_scores.first()?;
-            let column = match &suggestion.location {
-                Location::Column { path, .. } => path.clone(),
-                Location::File => "<file>".into(),
+            let Location::Column { path, .. } = &suggestion.location else {
+                return None;
             };
-            let baseline = suggestion.candidate_scores.iter().find(|score| {
-                score.plan.file_version == winner.plan.file_version
-                    && score.plan.structural == StructuralEncoding::Auto
-                    && score.plan.value == ValueEncoding::Auto
-                    && score.plan.general == GeneralCompression::Baseline
-            })?;
-            let savings = suggestion
-                .estimate
-                .as_ref()
-                .map(|estimate| {
-                    format!(
-                        "{} ({}%)",
-                        human_bytes(estimate.lower_bytes),
-                        estimate.lower_percent
-                    )
-                })
-                .unwrap_or_else(|| "-".into());
+            let column = report
+                .probe
+                .columns
+                .iter()
+                .find(|column| column.path == *path)?;
             Some(vec![
-                column,
-                plan_name(baseline.plan),
-                plan_name(winner.plan),
+                path.clone(),
+                crate::encoding_display::summarize(&column.raw_page_encodings, None),
+                crate::encoding_display::summarize(
+                    &winner.resolved_page_encodings,
+                    Some(winner.plan),
+                ),
+                format!(
+                    "{} → {}",
+                    report.probe.file_version, winner.plan.file_version
+                ),
                 human_bytes(winner.projected_file_bytes),
-                savings,
+                file_savings(report.probe.file_size_bytes, winner.projected_file_bytes),
             ])
         })
         .collect::<Vec<_>>();
-    let target_format = suggestions
-        .first()
-        .and_then(|suggestion| suggestion.candidate_scores.first())
-        .map(|winner| plan_parts(winner.plan).3)
-        .unwrap_or("unknown");
-    println!("\n  ENCODING CHANGES (evaluated within format {target_format})");
+    println!("\n  ENCODING CHANGES");
     print_table(&headers, &rows);
+}
+
+fn savings_percent(current: u64, projected: u64) -> u64 {
+    (u128::from(current.saturating_sub(projected)) * 100 / u128::from(current.max(1))) as u64
+}
+
+// The table includes the format change, so compare against the original file.
+fn file_savings(current: u64, projected: u64) -> String {
+    if projected > current {
+        let percent = u128::from(projected - current) * 100 / u128::from(current.max(1));
+        format!("-{} (-{}%)", human_bytes(projected - current), percent)
+    } else {
+        format!(
+            "{} ({}%)",
+            human_bytes(current - projected),
+            savings_percent(current, projected)
+        )
+    }
 }
 
 fn print_encodings(encodings: &[String]) {
@@ -215,10 +232,10 @@ fn print_table(headers: &[&str], rows: &[Vec<String>]) {
         .map(|(index, header)| {
             rows.iter()
                 .filter_map(|row| row.get(index))
-                .map(String::len)
+                .map(|value| value.chars().count())
                 .max()
                 .unwrap_or(0)
-                .max(header.len())
+                .max(header.chars().count())
         })
         .collect::<Vec<_>>();
     let separator = widths
