@@ -2,8 +2,8 @@ use std::cmp::Ordering;
 
 use crate::model::{
     Action, AnalyzeOptions, CandidateScore, ColumnProfile, EncodingFileVersion,
-    EncodingMeasurement, EncodingPlan, EstimateBasis, GeneralCompression, Location,
-    ProbeReport, SavingsEstimate, Severity, StructuralEncoding, Suggestion, ValueEncoding,
+    EncodingMeasurement, EncodingPlan, EstimateBasis, GeneralCompression, Location, ProbeReport,
+    SavingsEstimate, Severity, StructuralEncoding, Suggestion, ValueEncoding,
 };
 
 /// Evaluate measured encoding plans in top-level column order.

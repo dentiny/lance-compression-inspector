@@ -74,6 +74,67 @@ evaluation, so estimates reflect the sampled dataset distribution rather than
 each file’s individual row distribution. Deleted rows are excluded by Lance.
 Candidate rewrites use temporary local data and do not mutate the source dataset.
 
+## Remote storage
+
+Remote datasets use OpenDAL's `Operator` through
+`object_store_opendal::OpendalStore`. The same accessor handles manifest reads,
+dataset sampling, and data-file metadata. Supported URIs are
+`s3://bucket/path`, `gs://bucket/path`, and `az://container/path`.
+Local paths and `file://` URIs are also supported.
+
+All backend configuration comes from environment variables. The CLI only
+needs the dataset URI:
+
+```console
+AWS_REGION=us-east-1 cargo run -- s3://my-bucket/dataset.lance
+AWS_ENDPOINT_URL=http://localhost:9000 AWS_REGION=us-east-1 cargo run -- s3://my-bucket/dataset.lance
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json cargo run -- gs://my-bucket/dataset.lance
+OPENDAL_AZBLOB_ENDPOINT=https://myaccount.blob.core.windows.net cargo run -- az://my-container/dataset.lance
+```
+
+OpenDAL uses its native credential discovery, including AWS credential
+environment variables and Google's application credentials. Any OpenDAL backend
+option can also be supplied as `OPENDAL_<BACKEND>_<OPTION>`, where the backend
+is `S3`, `GCS`, or `AZBLOB`; for example, `OPENDAL_S3_REGION`,
+`OPENDAL_S3_ENDPOINT`, `OPENDAL_AZBLOB_ACCOUNT_NAME`, or
+`OPENDAL_AZBLOB_ACCOUNT_KEY`. These explicit options take precedence over
+native discovery. The dataset URI always determines the bucket/container and
+path, regardless of environment options for `root`, `bucket`, or `container`.
+
+For OCI Object Storage, use the S3 compatibility endpoint and an OCI Customer
+Secret Key pair in the standard AWS environment variables:
+
+```bash
+export AWS_ENDPOINT_URL="https://<namespace>.compat.objectstorage.<region>.oraclecloud.com"
+export AWS_REGION="<region>"
+# Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in your environment.
+cargo run -- s3://<bucket>/<dataset-path> --sample-rows 32
+```
+
+Remote source datasets are read only. Candidate rewrites still use local
+temporary storage. External data-file base paths remain unsupported.
+Snapshot selection (`--branch` and `--version`) works the same as for local
+datasets.
+
+### OCI smoke test
+
+Validated on 2026-09-29 against an existing private OCI WARC dataset through
+the S3 compatibility endpoint, with configuration supplied through environment variables:
+
+| Check | Result |
+|---|---|
+| Snapshot | Main branch, version 2 |
+| Dataset | 63,523 rows, 7 Lance data files, 20 columns |
+| Sample | 32 live rows |
+| Candidate measurements | 2,751 across the 7 files |
+| Blob handling | Descriptor column inspected; excluded from candidate rewrites |
+| Runtime | 31.7 seconds, local debug build; exit code 0 |
+
+This exercises remote manifest discovery, sampling, footer reads, and local
+candidate rewrites. The 32-row sample is a connectivity and execution smoke test,
+not a representative compression benchmark. GCS and Azure have not been tested
+against live services.
+
 ## Example: committed test dataset
 
 Run the inspector on the fixture without regenerating it:

@@ -8,7 +8,7 @@ pub const DEFAULT_SAMPLE_ROWS: usize = 16_384;
 /// Metadata and sample measurements for one resolved dataset snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DatasetProbeReport {
-    /// Canonical local path to the dataset directory.
+    /// Local path or remote URI of the dataset.
     pub source: String,
     /// Resolved manifest branch; manifests without a branch are reported as `main`.
     pub branch: String,
@@ -27,7 +27,7 @@ pub struct DatasetProbeReport {
 /// Analysis results grouped by data file for one resolved dataset snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DatasetAnalysisReport {
-    /// Canonical local path to the dataset directory.
+    /// Local path or remote URI of the dataset.
     pub source: String,
     /// Resolved manifest branch; manifests without a branch are reported as `main`.
     pub branch: String,
@@ -46,7 +46,7 @@ pub struct DatasetAnalysisReport {
 /// Metadata and optional sampled measurements for one physical Lance data file.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProbeReport {
-    /// Canonical local path to this standalone Lance data file.
+    /// Local path or remote URI of this Lance data file.
     pub source: String,
     /// Encoding format read from the file metadata, not the dataset snapshot version.
     pub file_version: EncodingFileVersion,
