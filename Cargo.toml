@@ -1,8 +1,9 @@
 [workspace]
 members = [
     "crates/lance-compression-estimation",
+    "crates/lance-compression-cli",
 ]
-default-members = ["crates/lance-compression-estimation"]
+default-members = ["crates/lance-compression-cli"]
 resolver = "3"
 
 [workspace.package]
