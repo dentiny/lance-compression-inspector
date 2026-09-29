@@ -28,7 +28,7 @@ use rand::seq::index;
 
 use crate::{
     ColumnProfile, DatasetProbeReport, EncodingFileVersion, EncodingMeasurement, EncodingPlan,
-    EncodingTag, GeneralCompression, ProbeReport, StructuralEncoding, ValueEncoding,
+    EncodingTag, GeneralCompression, ProbeReport, StructuralEncoding, ValueEncoding, encoding_tags,
 };
 
 /// Resolve a local dataset snapshot from its manifest and probe every active
@@ -598,6 +598,7 @@ pub async fn probe_local_file(source: impl AsRef<FsPath>) -> Result<ProbeReport>
                 lance_file::versions::physical_column_count(metadata.version, field);
             let end = physical_index.saturating_add(physical_count);
             let physical_columns = &metadata.column_metadatas[physical_index..end];
+            let physical_infos = &metadata.column_infos[physical_index..end];
             physical_index = end;
             let mut raw_page_encodings = physical_columns
                 .iter()
@@ -607,9 +608,9 @@ pub async fn probe_local_file(source: impl AsRef<FsPath>) -> Result<ProbeReport>
             raw_page_encodings.sort();
             raw_page_encodings.dedup();
 
-            let mut encoding_tags = raw_page_encodings
+            let mut encoding_tags = physical_infos
                 .iter()
-                .flat_map(|description| classify_encoding(description))
+                .flat_map(|column| encoding_tags::classify_column(column))
                 .collect::<BTreeSet<_>>();
             if encoding_tags.is_empty() {
                 encoding_tags.insert(EncodingTag::Unknown);
@@ -626,7 +627,14 @@ pub async fn probe_local_file(source: impl AsRef<FsPath>) -> Result<ProbeReport>
                     .iter()
                     .flat_map(|column| &column.pages)
                     .flat_map(|page| page.buffer_sizes.iter())
-                    .sum(),
+                    .sum::<u64>()
+                    .saturating_add(
+                        physical_infos
+                            .iter()
+                            .flat_map(|column| column.buffer_offsets_and_sizes.iter())
+                            .map(|(_, size)| *size)
+                            .sum(),
+                    ),
                 field_metadata: field.metadata.clone().into_iter().collect(),
                 encoding_tags,
                 encoding_measurements: vec![],
@@ -662,143 +670,11 @@ fn nested_field_paths(schema: &lance_core::datatypes::Schema) -> Vec<String> {
     output
 }
 
-/// Classify all currently known Lance encoding families while keeping the raw
-/// description in the report for forward compatibility.
-pub fn classify_encoding(description: &str) -> BTreeSet<EncodingTag> {
-    let lower = description.to_ascii_lowercase();
-    let mut tags = BTreeSet::new();
-
-    let mappings = [
-        ("miniblock", EncodingTag::StructuralMiniBlock),
-        ("fullzip", EncodingTag::StructuralFullZip),
-        ("sparselayout", EncodingTag::StructuralSparse),
-        ("bloblayout", EncodingTag::StructuralBlob),
-        ("nullable", EncodingTag::Nullable),
-        ("fixedsizelist", EncodingTag::FixedSizeList),
-        ("fixed_size_list", EncodingTag::FixedSizeList),
-        ("fixedsizebinary", EncodingTag::FixedSizeBinary),
-        ("fixed_size_binary", EncodingTag::FixedSizeBinary),
-        ("packedstruct", EncodingTag::PackedStruct),
-        ("packed_struct", EncodingTag::PackedStruct),
-        ("byte_stream_split", EncodingTag::ByteStreamSplit),
-        ("bytestreamsplit", EncodingTag::ByteStreamSplit),
-        ("bitpack", EncodingTag::BitPacked),
-        ("flat", EncodingTag::Flat),
-        ("rle", EncodingTag::Rle),
-        ("runlength", EncodingTag::Rle),
-        ("delta", EncodingTag::Delta),
-        ("fsst", EncodingTag::Fsst),
-        ("constant", EncodingTag::Constant),
-        ("variable", EncodingTag::VariableWidth),
-        ("indirectencoding", EncodingTag::Indirect),
-    ];
-    for (needle, tag) in mappings {
-        if lower.contains(needle) {
-            tags.insert(tag);
-        }
-    }
-
-    // Avoid matching metadata field names such as `dictionary: None` and
-    // `value_compression`; only tag actual debug enum variants.
-    if variant_present(&lower, "dictionary") {
-        tags.insert(EncodingTag::Dictionary);
-    }
-    if variant_present(&lower, "binary")
-        && !variant_present(&lower, "fixedsizebinary")
-        && !variant_present(&lower, "fixed_size_binary")
-    {
-        tags.insert(EncodingTag::Binary);
-    }
-    if variant_present(&lower, "list")
-        && !variant_present(&lower, "fixedsizelist")
-        && !variant_present(&lower, "fixed_size_list")
-    {
-        tags.insert(EncodingTag::List);
-    }
-    if variant_present(&lower, "simplestruct") {
-        tags.insert(EncodingTag::Struct);
-    }
-    if variant_present(&lower, "block") && !lower.contains("miniblock") {
-        tags.insert(EncodingTag::Block);
-    }
-
-    if lower.contains("zstd") {
-        tags.insert(EncodingTag::GeneralZstd);
-    }
-    if lower.contains("lz4") {
-        tags.insert(EncodingTag::GeneralLz4);
-    }
-    if lower.contains("compression: none")
-        || lower.contains("compression: \"none\"")
-        || lower.contains("compression_algorithm_unspecified")
-        || lower.contains("noencodingdescription")
-    {
-        tags.insert(EncodingTag::GeneralUncompressed);
-    }
-
-    if tags == BTreeSet::from([EncodingTag::Indirect])
-        || lower.contains("unrecognized(type_url=")
-        || lower.contains("unsupported(decode_err=")
-        || lower.contains("missing")
-    {
-        tags.insert(EncodingTag::Unknown);
-    }
-    if !tags.contains(&EncodingTag::GeneralZstd)
-        && !tags.contains(&EncodingTag::GeneralLz4)
-        && !tags.contains(&EncodingTag::Unknown)
-    {
-        // Lance's only general codecs are ZSTD and LZ4. Their absence means the
-        // default (general compression disabled), even when protobuf omits the
-        // optional compression field.
-        tags.insert(EncodingTag::GeneralUncompressed);
-    }
-    tags
-}
-
-fn variant_present(description: &str, name: &str) -> bool {
-    description.contains(&format!("{name}(")) || description.contains(&format!("{name} {{"))
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
     use super::*;
-
-    #[test]
-    fn classifies_multiple_layers_without_losing_composition() {
-        let tags = classify_encoding(
-            "MiniBlockLayout(Binary { values: RLE, compression: Zstd, bss: ByteStreamSplit })",
-        );
-        assert!(tags.contains(&EncodingTag::StructuralMiniBlock));
-        assert!(tags.contains(&EncodingTag::Binary));
-        assert!(tags.contains(&EncodingTag::Rle));
-        assert!(tags.contains(&EncodingTag::GeneralZstd));
-        assert!(tags.contains(&EncodingTag::ByteStreamSplit));
-    }
-
-    #[test]
-    fn marks_future_encoding_as_unknown() {
-        let tags = classify_encoding("Unrecognized(type_url=/lance.encodings.Future)");
-        assert_eq!(tags, BTreeSet::from([EncodingTag::Unknown]));
-    }
-
-    #[test]
-    fn recognizes_default_general_compression_as_disabled() {
-        let tags = classify_encoding("Flat { compression: None }");
-        assert!(tags.contains(&EncodingTag::Flat));
-        assert!(tags.contains(&EncodingTag::GeneralUncompressed));
-    }
-
-    #[test]
-    fn does_not_treat_absent_dictionary_field_as_dictionary_encoding() {
-        let tags = classify_encoding(
-            "MiniBlockLayout { value_compression: Some(Variable { values: None }), dictionary: None }",
-        );
-        assert!(!tags.contains(&EncodingTag::Dictionary));
-        assert!(!tags.contains(&EncodingTag::Block));
-        assert!(!tags.contains(&EncodingTag::Value));
-    }
 
     #[test]
     fn plans_are_type_and_version_aware() {

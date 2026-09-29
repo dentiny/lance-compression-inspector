@@ -1,6 +1,7 @@
 //! Probe Lance file metadata and estimate encoding-aware optimizations.
 
 mod analysis;
+mod encoding_tags;
 mod model;
 pub mod probe;
 mod rules;
