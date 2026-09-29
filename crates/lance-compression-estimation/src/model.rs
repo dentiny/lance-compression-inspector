@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -83,48 +83,16 @@ pub struct ColumnProfile {
     pub on_disk_bytes: u64,
     /// Source field metadata, including existing writer controls and custom entries.
     pub field_metadata: BTreeMap<String, String>,
-    /// Union of normalized tags from typed column/page encoding metadata. Multiple
-    /// encoding layers may coexist; `Unknown` marks unclassified encoding information.
-    pub encoding_tags: BTreeSet<EncodingTag>,
+    /// Whether this field or any child stores Blob payloads outside its column buffers.
+    /// Such columns are excluded from compression recommendations.
+    pub has_blob: bool,
     /// Measurements from this data file's bounded row sample. Each plan changes
     /// writer controls only for this top-level field; empty if no measurements
     /// were collected (for example, sampling was disabled or the file is legacy).
     pub encoding_measurements: Vec<EncodingMeasurement>,
     /// Sorted, deduplicated page-encoding descriptions retained for inspection,
-    /// including encodings that the normalized tags cannot classify.
+    /// as returned by Lance without parsing them into a separate tag vocabulary.
     pub raw_page_encodings: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "kebab-case")]
-pub enum EncodingTag {
-    GeneralUncompressed,
-    GeneralLz4,
-    GeneralZstd,
-    StructuralMiniBlock,
-    StructuralFullZip,
-    StructuralSparse,
-    StructuralBlob,
-    Nullable,
-    List,
-    Struct,
-    Flat,
-    Value,
-    Block,
-    Binary,
-    FixedSizeBinary,
-    Dictionary,
-    Rle,
-    BitPacked,
-    ByteStreamSplit,
-    Delta,
-    Fsst,
-    PackedStruct,
-    FixedSizeList,
-    Constant,
-    VariableWidth,
-    Indirect,
-    Unknown,
 }
 
 /// Recommendations and their input measurements for one data file.
@@ -150,8 +118,8 @@ pub struct Suggestion {
     pub message: String,
     /// Proposed inspection or rewrite; analysis does not execute this action.
     pub action: Action,
-    /// Optional encoding-only savings estimate. Unknown encodings, unavailable
-    /// measurements, and file-version recommendations currently leave this unset.
+    /// Optional encoding-only savings estimate. Unavailable measurements and
+    /// file-version recommendations currently leave this unset.
     pub estimate: Option<SavingsEstimate>,
     /// Plans for this column in the selected target format, sorted by ascending
     /// `effective_score` (best first). Empty for non-plan recommendations.
@@ -199,7 +167,6 @@ pub enum Action {
         /// values outside the signed 64-bit range are clamped.
         size_delta_bytes: Option<i64>,
     },
-    InspectUnknownEncoding,
 }
 
 /// Structural layout selection. `Auto` leaves the source field's metadata
@@ -271,7 +238,7 @@ pub struct EncodingPlan {
     /// Requested structural layout for the target top-level field.
     pub structural: StructuralEncoding,
     /// Requested value-encoding control; the writer may still choose other
-    /// encodings, which are recorded in the measurement's resolved tags.
+    /// encodings, which are recorded in the measurement's page descriptions.
     pub value: ValueEncoding,
     /// Requested general compressor. `Baseline` preserves source metadata, while
     /// `None` explicitly disables general compression.
@@ -303,9 +270,9 @@ pub struct EncodingMeasurement {
     /// Measured target-column page and shared-buffer bytes in the temporary
     /// rewrite. Excludes other columns and file overhead; not a full-column projection.
     pub encoded_bytes: u64,
-    /// Encoding layers actually selected by the writer for the sampled target
-    /// column; these can differ from the requested controls in `plan`.
-    pub resolved_encoding_tags: BTreeSet<EncodingTag>,
+    /// Actual page-encoding descriptions returned by Lance for the sampled column.
+    /// Kept separately from the requested plan; distinct encodings remain distinct.
+    pub resolved_page_encodings: Vec<String>,
 }
 
 /// A column-level candidate evaluated within one target file format.
@@ -320,9 +287,8 @@ pub struct CandidateScore {
     /// Measured bytes for this column in the sample rewrite, before extrapolation
     /// to the full column; excludes other columns and file overhead.
     pub encoded_bytes: u64,
-    /// Encoding layers observed in the sample rewrite, not merely requested by
-    /// the candidate plan.
-    pub resolved_encoding_tags: BTreeSet<EncodingTag>,
+    /// Actual page-encoding descriptions from the sampled rewrite.
+    pub resolved_page_encodings: Vec<String>,
     /// Estimated full-column bytes: target-format baseline column bytes times
     /// the candidate-to-baseline sample byte ratio. A zero-byte sample baseline
     /// falls back to the baseline column size.
@@ -335,15 +301,10 @@ pub struct CandidateScore {
     pub projected_file_bytes: u64,
     /// Used for decoding penalty.
     ///
-    /// Heuristic penalty for adding compression to an already compact column.
-    /// Set to 1.0 unless `consider_decoding_penalty` is enabled.
-    pub consideration_factor: f64,
-    /// Used for decoding penalty.
-    ///
     /// Heuristic decode-cost multiplier, not a measured runtime.
     /// Set to 1.0 unless `consider_decoding_penalty` is enabled.
     pub decoding_penalty: f64,
-    /// `projected_column_bytes * consideration_factor * decoding_penalty`.
+    /// `projected_column_bytes * decoding_penalty`.
     /// Lower is better when ranking candidates for this column.
     pub effective_score: f64,
 }
@@ -351,10 +312,9 @@ pub struct CandidateScore {
 /// Optional ranking policy, separate from measurement and size projection.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AnalyzeOptions {
-    /// Enable both consideration and decode-cost heuristics when ranking plans.
-    /// Defaults to false, so ranking uses projected column bytes alone. Factors
-    /// leave each candidate's size projection unchanged, but can change the winner
-    /// and therefore the savings reported for the selected plan.
+    /// Apply a codec/level decode-cost heuristic when ranking plans.
+    /// Defaults to false. The multiplier can change the winner, but does not
+    /// change any candidate's projected size.
     pub consider_decoding_penalty: bool,
 }
 
