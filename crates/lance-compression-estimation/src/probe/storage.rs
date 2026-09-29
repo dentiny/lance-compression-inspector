@@ -67,49 +67,29 @@ pub(super) fn dataset_builder(source: &str) -> Result<(String, DatasetBuilder)> 
     }
     let bucket = uri
         .host_str()
-        .context("dataset URI must include a bucket or container")?;
+        .context("dataset URI must include a bucket")?;
     if uri.port().is_some() {
         bail!("configure the endpoint through environment variables");
     }
-    let backend = match uri.scheme() {
-        "s3" => "S3",
-        "gs" => "GCS",
-        "az" => "AZBLOB",
-        scheme => {
-            bail!("unsupported dataset scheme {scheme}; use s3://, gs://, az://, or a local path")
-        }
-    };
-    // Backend options come from OPENDAL_<BACKEND>_<OPTION>.
-    let prefix = format!("OPENDAL_{backend}_");
+    if uri.scheme() != "s3" {
+        bail!(
+            "unsupported dataset scheme {}; use s3:// or a local path",
+            uri.scheme()
+        );
+    }
+    // Backend options come from OPENDAL_S3_<OPTION>.
     let mut options: HashMap<String, String> = std::env::vars()
         .filter_map(|(key, value)| {
-            key.strip_prefix(&prefix)
+            key.strip_prefix("OPENDAL_S3_")
                 .map(|key| (key.to_ascii_lowercase(), value))
         })
         .collect();
     // The URI always determines the location, even if these options exist in env.
-    options.remove("bucket");
-    options.remove("container");
     // Keep the operator rooted at the bucket: Lance passes bucket-relative paths.
     options.insert("root".into(), "/".into());
     opendal::install_default();
-    let operator = match uri.scheme() {
-        "s3" => {
-            options.insert("bucket".into(), bucket.into());
-            Operator::from_iter::<services::S3>(options)?
-        }
-        "gs" => {
-            options.insert("bucket".into(), bucket.into());
-            Operator::from_iter::<services::Gcs>(options)?
-        }
-        "az" => {
-            options.insert("container".into(), bucket.into());
-            Operator::from_iter::<services::Azblob>(options)?
-        }
-        scheme => {
-            bail!("unsupported dataset scheme {scheme}; use s3://, gs://, az://, or a local path")
-        }
-    };
+    options.insert("bucket".into(), bucket.into());
+    let operator = Operator::from_iter::<services::S3>(options)?;
     let session = Arc::new(Session::default());
     session.store_registry().insert(
         uri.scheme(),

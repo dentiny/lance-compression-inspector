@@ -13,7 +13,7 @@ use lance_compression_estimation::{
     about = "Inspect a Lance dataset snapshot for compression opportunities"
 )]
 struct Args {
-    /// Local dataset directory or s3://, gs://, az:// dataset URI.
+    /// Local dataset directory or s3:// dataset URI.
     dataset: String,
 
     /// Dataset branch. Defaults to main.
