@@ -48,16 +48,6 @@ pub(super) fn dataset_builder(source: &str) -> Result<(String, DatasetBuilder)> 
     }
 
     let uri = Url::parse(source).context("invalid dataset URI")?;
-    if !uri.username().is_empty()
-        || uri.password().is_some()
-        || uri.query().is_some()
-        || uri.fragment().is_some()
-        || uri.port().is_some()
-    {
-        bail!(
-            "configure credentials and endpoints through environment variables; URI must contain only the dataset location"
-        );
-    }
     if uri.scheme() == "file" {
         let path = uri
             .to_file_path()
