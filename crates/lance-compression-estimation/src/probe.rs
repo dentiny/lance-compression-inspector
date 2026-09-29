@@ -4,16 +4,11 @@
 //! reporting. Sampling and scoring do not depend on a custom encoding taxonomy.
 
 mod compression_candidates;
+mod encoding_candidates;
 mod sampling;
+mod type_utils;
 
-/// Generate general compression candidates for a top-level field.
-pub fn candidate_plans_for_type(
-    _data_type: &arrow_schema::DataType,
-    file_version: EncodingFileVersion,
-) -> Vec<crate::EncodingPlan> {
-    compression_candidates::compression_candidate_plans(file_version)
-}
-
+pub use encoding_candidates::candidate_plans_for_type;
 use sampling::attach_data_file_measurements;
 pub use sampling::sample_dataset;
 

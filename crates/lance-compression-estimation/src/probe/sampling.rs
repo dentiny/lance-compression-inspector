@@ -1,6 +1,6 @@
 //! Sample dataset rows and measure candidate rewrites sequentially.
 
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use anyhow::{Context, Result};
 use arrow_array::{RecordBatch, RecordBatchIterator};
@@ -9,7 +9,10 @@ use lance::{Dataset, dataset::WriteParams};
 use lance_file::version::LanceFileVersion;
 
 use super::{
-    candidate_plans_for_type, compression_candidates::with_compression_field, probe_local_file,
+    encoding_candidates::{
+        candidate_plans_for_type, combined_candidate_plans, with_candidate_field,
+    },
+    probe_local_file,
 };
 use crate::{EncodingFileVersion, EncodingMeasurement, EncodingPlan, ProbeReport};
 
@@ -34,7 +37,9 @@ pub(super) async fn attach_data_file_measurements(
     let measured_rows = sample.num_rows() as u64;
     let schema = sample.schema();
 
-    // Measure each general compression candidate before starting the next.
+    // The bounded policy runs one axis sweep, keeps the best structural and
+    // value plan, and then combines only that small beam with representative
+    // general compressors. Each rewrite finishes before the next one starts.
     for field in schema.fields() {
         let path = field.name().to_string();
         if !report.columns.iter().any(|column| column.path == path) {
@@ -60,6 +65,25 @@ pub(super) async fn attach_data_file_measurements(
             measurements.push(measurement);
         }
 
+        let stage_two = combined_candidate_plans(&measurements);
+        let measured_plans = measurements
+            .iter()
+            .map(|measurement| measurement.plan)
+            .collect::<BTreeSet<_>>();
+        for plan in stage_two {
+            if measured_plans.contains(&plan) {
+                continue;
+            }
+            let measurement = measure_candidate(
+                batches.clone(),
+                path.clone(),
+                plan,
+                measured_rows,
+                file_version_for_plan(plan),
+            )
+            .await?;
+            measurements.push(measurement);
+        }
         if let Some(column) = report.columns.iter_mut().find(|column| column.path == path) {
             column.encoding_measurements = measurements;
         }
@@ -138,7 +162,7 @@ fn with_candidate_schema(
         .iter()
         .map(|field| {
             if field.name() == target_path {
-                Arc::new(with_compression_field(field, plan.general))
+                Arc::new(with_candidate_field(field, plan))
             } else {
                 field.clone()
             }
@@ -176,8 +200,8 @@ mod tests {
         let source = Arc::new(ArrowSchema::new(vec![Arc::new(target), other.clone()]));
         let batch = RecordBatch::new_empty(source);
         let plan = EncodingPlan {
-            structural: StructuralEncoding::Auto,
-            value: ValueEncoding::Auto,
+            structural: StructuralEncoding::MiniBlock,
+            value: ValueEncoding::Rle,
             general: GeneralCompression::Lz4,
             file_version: EncodingFileVersion::V2_2,
         };
