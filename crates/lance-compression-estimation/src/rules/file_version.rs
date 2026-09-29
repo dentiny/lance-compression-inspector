@@ -12,11 +12,11 @@ const V2_3_CAPABILITIES: &[&str] = &["sparse-structural-layout"];
 /// Evaluate stable and experimental format upgrades for one physical file.
 pub(crate) fn evaluate_file_versions(probe: &ProbeReport) -> Vec<Suggestion> {
     match probe.file_version {
-        EncodingFileVersion::V2_3 => vec![],
+        EncodingFileVersion::V1 | EncodingFileVersion::V2_3 => vec![],
         EncodingFileVersion::V2_2 => {
             vec![upgrade_suggestion(probe, EncodingFileVersion::V2_3, true)]
         }
-        EncodingFileVersion::V1 | EncodingFileVersion::V2_0 | EncodingFileVersion::V2_1 => vec![
+        EncodingFileVersion::V2_0 | EncodingFileVersion::V2_1 => vec![
             upgrade_suggestion(probe, EncodingFileVersion::V2_2, false),
             upgrade_suggestion(probe, EncodingFileVersion::V2_3, true),
         ],

@@ -35,3 +35,21 @@ pub(super) fn supports_dictionary(data_type: &DataType) -> bool {
         DataType::Utf8 | DataType::LargeUtf8 | DataType::Binary | DataType::LargeBinary
     ) || fixed_bit_width(data_type).is_some_and(|width| matches!(width, 64 | 128))
 }
+
+/// Packed candidates require flat children and at least one variable-width child.
+/// Lists and nested structs can fail inside Lance's packed data-block conversion.
+pub(super) fn supports_packed_struct(data_type: &DataType) -> bool {
+    let DataType::Struct(fields) = data_type else {
+        return false;
+    };
+    let variable = |ty: &DataType| {
+        matches!(
+            ty,
+            DataType::Utf8 | DataType::LargeUtf8 | DataType::Binary | DataType::LargeBinary
+        )
+    };
+    fields
+        .iter()
+        .all(|f| variable(f.data_type()) || fixed_bit_width(f.data_type()).is_some())
+        && fields.iter().any(|f| variable(f.data_type()))
+}

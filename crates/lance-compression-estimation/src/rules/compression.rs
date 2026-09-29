@@ -199,6 +199,9 @@ fn projected_file_for_version(
     source: EncodingFileVersion,
     target: EncodingFileVersion,
 ) -> Option<u64> {
+    if source == target {
+        return Some(probe.file_size_bytes);
+    }
     let current_column_bytes = probe
         .columns
         .iter()

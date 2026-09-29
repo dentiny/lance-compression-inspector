@@ -27,11 +27,22 @@ pub fn candidate_plans_for_type(
                 ..baseline
             });
         }
-        plans.push(EncodingPlan {
-            structural: StructuralEncoding::Sparse,
-            file_version: EncodingFileVersion::V2_3,
-            ..baseline
-        });
+        if fixed_bit_width(data_type).is_some()
+            || matches!(
+                data_type,
+                DataType::Boolean
+                    | DataType::Utf8
+                    | DataType::LargeUtf8
+                    | DataType::Binary
+                    | DataType::LargeBinary
+            )
+        {
+            plans.push(EncodingPlan {
+                structural: StructuralEncoding::Sparse,
+                file_version: EncodingFileVersion::V2_3,
+                ..baseline
+            });
+        }
     }
 
     let mut add_value = |value, general| {
@@ -61,7 +72,7 @@ pub fn candidate_plans_for_type(
     if supports_dictionary(data_type) {
         add_value(ValueEncoding::Dictionary, GeneralCompression::Baseline);
     }
-    if matches!(data_type, DataType::Struct(_))
+    if super::type_utils::supports_packed_struct(data_type)
         && matches!(
             file_version,
             EncodingFileVersion::V2_2 | EncodingFileVersion::V2_3
@@ -231,9 +242,8 @@ mod tests {
                 .any(|plan| plan.value == ValueEncoding::Dictionary)
         );
 
-        let struct_type = DataType::Struct(
-            vec![Arc::new(ArrowField::new("child", DataType::Int32, true))].into(),
-        );
+        let struct_type =
+            DataType::Struct(vec![Arc::new(ArrowField::new("child", DataType::Utf8, true))].into());
         let structs = candidate_plans_for_type(&struct_type, EncodingFileVersion::V2_2);
         assert!(
             structs

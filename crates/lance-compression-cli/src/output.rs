@@ -47,22 +47,14 @@ fn print_file(report: &AnalysisReport, verbose: bool) {
         .suggestions
         .iter()
         .filter(|suggestion| {
-            verbose
-                || suggestion.candidate_scores.first().map_or_else(
-                    || {
-                        !suggestion
-                            .estimate
-                            .as_ref()
-                            .is_some_and(|estimate| estimate.lower_percent == 0)
-                    },
-                    |winner| {
-                        savings_percent(report.probe.file_size_bytes, winner.projected_file_bytes)
-                            > 0
-                    },
-                )
+            verbose || visible_by_default(suggestion, report.probe.file_size_bytes)
         })
         .collect::<Vec<_>>();
 
+    if visible.is_empty() {
+        println!("  No recommended changes.");
+        return;
+    }
     let format_suggestions = visible
         .iter()
         .copied()
@@ -88,6 +80,18 @@ fn print_file(report: &AnalysisReport, verbose: bool) {
             print_details(suggestion);
         }
     }
+}
+
+fn visible_by_default(suggestion: &Suggestion, file_bytes: u64) -> bool {
+    suggestion.candidate_scores.first().map_or_else(
+        || {
+            !suggestion
+                .estimate
+                .as_ref()
+                .is_some_and(|estimate| estimate.lower_bytes == 0)
+        },
+        |winner| winner.projected_file_bytes < file_bytes,
+    )
 }
 
 fn print_non_plan_conclusion(suggestion: &Suggestion) {
@@ -195,22 +199,17 @@ fn print_plan_table(report: &AnalysisReport, suggestions: &[&Suggestion]) {
     print_table(&headers, &rows);
 }
 
-fn savings_percent(current: u64, projected: u64) -> u64 {
-    (u128::from(current.saturating_sub(projected)) * 100 / u128::from(current.max(1))) as u64
-}
-
-// The table includes the format change, so compare against the original file.
+// Compare with the original file, including the format migration cost.
 fn file_savings(current: u64, projected: u64) -> String {
-    if projected > current {
-        let percent = u128::from(projected - current) * 100 / u128::from(current.max(1));
-        format!("-{} (-{}%)", human_bytes(projected - current), percent)
+    let delta = current.abs_diff(projected);
+    let percent = u128::from(delta) * 100 / u128::from(current.max(1));
+    let percent = if delta > 0 && percent == 0 {
+        "<1".into()
     } else {
-        format!(
-            "{} ({}%)",
-            human_bytes(current - projected),
-            savings_percent(current, projected)
-        )
-    }
+        percent.to_string()
+    };
+    let sign = if projected > current { "-" } else { "" };
+    format!("{sign}{} ({sign}{percent}%)", human_bytes(delta))
 }
 
 fn print_encodings(encodings: &[String]) {
@@ -348,5 +347,31 @@ fn human_bytes(bytes: u64) -> String {
         format!("{:.2} KiB", bytes / KIB)
     } else {
         format!("{bytes:.0} B")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn positive_sub_percent_suggestions_are_visible_without_verbose() {
+        let suggestion: Suggestion = serde_json::from_value(serde_json::json!({
+            "rule": "encoding-plan-opportunity", "severity": "suggestion",
+            "location": {"kind": "column", "index": 0, "path": "value"},
+            "message": "small improvement", "action": {"kind": "probe-encoding-plans", "plans": []},
+            "estimate": {"basis": "measured-probe", "lower_bytes": 1, "upper_bytes": 1,
+                "lower_percent": 0, "upper_percent": 0, "caveat": "sample"},
+            "candidate_scores": [{"plan": {"structural": "auto", "value": "auto",
+                "general": {"kind": "lz4"}, "file_version": "2.2"}, "sample_rows": 100,
+                "encoded_bytes": 99, "resolved_page_encodings": [], "projected_column_bytes": 99,
+                "projected_file_bytes": 99999, "decoding_penalty": 1.0, "effective_score": 99.0}],
+            "evidence": []
+        }))
+        .unwrap();
+        assert!(visible_by_default(&suggestion, 100000));
+        assert_eq!(file_savings(100000, 99999), "1 B (<1%)");
+        assert!(!visible_by_default(&suggestion, 99999));
+        assert!(!visible_by_default(&suggestion, 99998));
     }
 }

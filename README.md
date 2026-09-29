@@ -32,9 +32,9 @@ Ranking uses measured sample bytes by default. `--consider-decoding-penalty` ena
 a codec/level decode-cost heuristic, exposed explicitly in the report.
 It changes ranking only; projected sizes remain based on measured bytes.
 
-File format capabilities are version-aware. Files older than the current stable
-2.2 format can receive a rewrite suggestion for constant layouts, larger
-miniblocks, and variable packed structs. The unstable 2.3 sparse layout is
+Supported file formats are 2.0–2.3; legacy v1 files are rejected with an explicit
+error. Files older than the current stable 2.2 format can receive a rewrite
+suggestion for constant layouts, larger miniblocks, and variable packed structs. The unstable 2.3 sparse layout is
 also considered as a separate experimental recommendation. When baseline
 sample measurements are available, format recommendations include projected
 file size and the estimated gain or cost.
@@ -50,9 +50,18 @@ Blob columns are identified using Lance's schema metadata and excluded from
 compression recommendations. File-size projections keep Blob bytes unchanged
 so unmeasured Blob columns do not suppress recommendations for other columns.
 
-Each rewrite changes metadata only on its target top-level field and preserves
-schema and metadata for every other field. Reports aggregate all physical pages
-belonging to that logical field. Nested child paths are intentionally not
+Each temporary rewrite contains only its target top-level field. Baselines use
+that physical file's footer metadata, including nested encoding controls, rather
+than the latest manifest metadata. Measurements are reused across files only
+when field ID, source format, and physical field configuration match. All output
+files from a sample rewrite contribute to its measured bytes.
+
+Fields are matched by ID so renames and dropped columns do not hide other
+recommendations. Dropped column bytes remain in fixed file overhead. A changed
+nested shape is left unmeasured because its old baseline cannot be reproduced.
+Unsupported optional candidates are skipped with a diagnostic; source baseline
+and I/O failures remain errors. Reports aggregate all physical pages
+belonging to the logical field. Nested child paths are intentionally not
 offered as independent targets; their parent top-level field is measured as a
 whole, avoiding false per-child estimates.
 
@@ -164,8 +173,9 @@ Each row estimates the displayed format change plus a change to **only that
 column**. `SAVINGS` compares the projected file with the original file, including
 the format migration cost; these separate what-if results are not a combined
 rewrite result. Percentages use the original file size, not the column size.
-The default table omits rows whose net file savings round down to 0%. JSON and
-verbose candidate estimates retain encoding-only savings within the target format.
+Positive savings below 1% remain visible and are labeled `<1%`. The default
+encoding table omits rows with no net file savings. JSON and verbose candidate
+estimates retain encoding-only savings within the target format.
 
 These numbers extrapolate measured sample rewrites; the full source dataset was
 not rewritten. File-level overhead is held constant by the estimator. Sampling is
