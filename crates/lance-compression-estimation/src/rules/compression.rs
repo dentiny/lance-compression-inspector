@@ -6,8 +6,14 @@ use crate::model::{
     Severity, Suggestion,
 };
 
+// General compression has fixed per-page metadata and CPU costs. Below 8 MiB
+// per physical column, metadata-only savings estimates are usually too small
+// and noisy to justify an optimization recommendation.
 const MIN_GENERAL_COMPRESSION_BYTES: u64 = 8 * 1024 * 1024;
-const CANDIDATES: [EncodingCandidate; 4] = [
+
+// Each (algorithm, level) pair is scored as a distinct encoding candidate.
+// The ZSTD levels span fast, balanced, and high-compression operating points.
+const CANDIDATES: [EncodingCandidate; 6] = [
     EncodingCandidate {
         algorithm: CompressionAlgorithm::Lz4,
         level: None,
@@ -22,7 +28,15 @@ const CANDIDATES: [EncodingCandidate; 4] = [
     },
     EncodingCandidate {
         algorithm: CompressionAlgorithm::Zstd,
+        level: Some(6),
+    },
+    EncodingCandidate {
+        algorithm: CompressionAlgorithm::Zstd,
         level: Some(9),
+    },
+    EncodingCandidate {
+        algorithm: CompressionAlgorithm::Zstd,
+        level: Some(12),
     },
 ];
 
@@ -142,13 +156,19 @@ fn heuristic_savings_range(column: &ColumnProfile, candidate: EncodingCandidate)
         (CompressionAlgorithm::Lz4, _, _, true) => (2, 15),
         (CompressionAlgorithm::Zstd, Some(1), true, false) => (20, 55),
         (CompressionAlgorithm::Zstd, Some(3), true, false) => (25, 65),
+        (CompressionAlgorithm::Zstd, Some(6), true, false) => (28, 69),
         (CompressionAlgorithm::Zstd, Some(9), true, false) => (30, 72),
+        (CompressionAlgorithm::Zstd, Some(12), true, false) => (32, 75),
         (CompressionAlgorithm::Zstd, Some(1), false, false) => (8, 35),
         (CompressionAlgorithm::Zstd, Some(3), false, false) => (10, 45),
+        (CompressionAlgorithm::Zstd, Some(6), false, false) => (13, 49),
         (CompressionAlgorithm::Zstd, Some(9), false, false) => (15, 52),
+        (CompressionAlgorithm::Zstd, Some(12), false, false) => (17, 55),
         (CompressionAlgorithm::Zstd, Some(1), _, true) => (2, 18),
         (CompressionAlgorithm::Zstd, Some(3), _, true) => (3, 25),
+        (CompressionAlgorithm::Zstd, Some(6), _, true) => (4, 28),
         (CompressionAlgorithm::Zstd, Some(9), _, true) => (5, 30),
+        (CompressionAlgorithm::Zstd, Some(12), _, true) => (6, 32),
         (CompressionAlgorithm::Zstd, None, _, _) => (3, 25),
         (CompressionAlgorithm::Zstd, Some(_), _, _) => (3, 25),
     }
@@ -159,7 +179,9 @@ fn decode_penalty(candidate: EncodingCandidate) -> f64 {
         (CompressionAlgorithm::Lz4, _) => 1.0,
         (CompressionAlgorithm::Zstd, Some(level)) if level <= 1 => 1.15,
         (CompressionAlgorithm::Zstd, Some(level)) if level <= 3 => 1.25,
-        (CompressionAlgorithm::Zstd, _) => 1.75,
+        (CompressionAlgorithm::Zstd, Some(level)) if level <= 6 => 1.45,
+        (CompressionAlgorithm::Zstd, Some(level)) if level <= 9 => 1.75,
+        (CompressionAlgorithm::Zstd, _) => 2.0,
     }
 }
 
@@ -253,12 +275,12 @@ mod tests {
     fn each_algorithm_level_is_a_distinct_candidate() {
         let suggestions = check(&report("Utf8"), AnalyzeOptions::default());
         let candidates = &suggestions[0].candidate_scores;
-        assert_eq!(candidates.len(), 4);
+        assert_eq!(candidates.len(), 6);
         assert!(candidates.iter().any(|score| {
             score.candidate.algorithm == CompressionAlgorithm::Zstd
-                && score.candidate.level == Some(9)
+                && score.candidate.level == Some(12)
         }));
-        assert_eq!(candidates[0].candidate.level, Some(9));
+        assert_eq!(candidates[0].candidate.level, Some(12));
     }
 
     #[test]
