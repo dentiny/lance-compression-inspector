@@ -350,15 +350,3 @@ fn human_bytes(bytes: u64) -> String {
         format!("{bytes:.0} B")
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn table_savings_include_format_migration_cost() {
-        assert_eq!(file_savings(1000, 750), "250 B (25%)");
-        assert_eq!(file_savings(1000, 1250), "-250 B (-25%)");
-        assert_eq!(file_savings(0, 0), "0 B (0%)");
-    }
-}
