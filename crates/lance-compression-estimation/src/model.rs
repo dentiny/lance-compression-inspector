@@ -2,9 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-/// Maximum visible rows sampled from each dataset fragment. Every active
-/// physical data file in that fragment is evaluated on the same row sample;
-/// this is not a per-page or per-row-group limit.
+/// Maximum visible rows sampled uniformly without replacement from each
+/// dataset fragment. Every active physical data file in that fragment is
+/// evaluated on the same random sample; this is not a per-page or per-row-group
+/// limit.
 pub const DEFAULT_SAMPLE_ROWS: usize = 16_384;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

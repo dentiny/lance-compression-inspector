@@ -13,7 +13,7 @@ use std::{
 use anyhow::{Context, Result};
 use arrow_array::{RecordBatch, RecordBatchIterator};
 use arrow_schema::{Field as ArrowField, Schema as ArrowSchema};
-use futures::{TryStreamExt, future::try_join_all};
+use futures::future::try_join_all;
 use lance::{Dataset, dataset::builder::DatasetBuilder};
 use lance_file::reader::{FileReader, describe_encoding};
 use lance_io::{
@@ -121,18 +121,16 @@ async fn attach_sample_measurements(
     // Sample each fragment independently so one fragment's distribution is
     // never used to recommend settings for another fragment's physical files.
     for fragment in dataset.iter_fragments() {
-        let mut scanner = dataset.scan();
-        scanner.with_fragments(vec![fragment.clone()]);
-        scanner.limit(Some(sample_rows as i64), None)?;
-        let batches = scanner
-            .try_into_stream()
-            .await?
-            .try_collect::<Vec<_>>()
+        let fragment_id =
+            u32::try_from(fragment.id).context("fragment ID exceeds Lance's u32 sampling limit")?;
+        let batch = dataset
+            .sample(sample_rows, dataset.schema(), Some(&[fragment_id]))
             .await?;
-        if batches.is_empty() {
+        if batch.num_rows() == 0 {
             continue;
         }
-        let measured_rows = batches.iter().map(RecordBatch::num_rows).sum::<usize>() as u64;
+        let measured_rows = batch.num_rows() as u64;
+        let batches = vec![batch];
 
         // Each candidate writes its own temporary Lance dataset. Running these
         // futures together parallelizes encoding of the same fragment sample.
