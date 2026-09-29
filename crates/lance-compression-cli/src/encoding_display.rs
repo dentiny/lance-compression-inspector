@@ -67,10 +67,10 @@ fn summarize_page(encoding: &str, plan: Option<EncodingPlan>) -> Option<String> 
                 "ByteStreamSplit" => Some("bss"),
                 _ => return None,
             };
-            if let Some(value) = value {
-                if !values.contains(&value) {
-                    values.push(value);
-                }
+            if let Some(value) = value
+                && !values.contains(&value)
+            {
+                values.push(value);
             }
         }
         if *line == "dictionary: Some(" && !values.contains(&"dictionary") {
