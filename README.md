@@ -47,7 +47,8 @@ Automatic choices retain their requested mode as `auto(actual)`, for example
 `auto(miniblock) / auto(variable+flat) / zstd:6`. Codec levels come from the
 written metadata; a missing ZSTD level is labeled `level not recorded`.
 Blob columns are identified using Lance's schema metadata and excluded from
-compression recommendations.
+compression recommendations. File-size projections keep Blob bytes unchanged
+so unmeasured Blob columns do not suppress recommendations for other columns.
 
 Each rewrite changes metadata only on its target top-level field and preserves
 schema and metadata for every other field. Reports aggregate all physical pages
@@ -73,6 +74,72 @@ selected snapshot. The same dataset sample is reused for per-file candidate
 evaluation, so estimates reflect the sampled dataset distribution rather than
 each file’s individual row distribution. Deleted rows are excluded by Lance.
 Candidate rewrites use temporary local data and do not mutate the source dataset.
+
+## Remote storage
+
+Remote datasets use OpenDAL's `Operator` through
+`object_store_opendal::OpendalStore`. The same accessor handles manifest reads,
+dataset sampling, and data-file metadata. Use `s3://bucket/path` for S3-compatible storage.
+Local paths and `file://` URIs are also supported.
+
+All backend configuration comes from environment variables. The CLI only
+needs the dataset URI:
+
+```console
+AWS_REGION=us-east-1 cargo run -- s3://my-bucket/dataset.lance
+AWS_ENDPOINT_URL=http://localhost:9000 AWS_REGION=us-east-1 cargo run -- s3://my-bucket/dataset.lance
+```
+
+OpenDAL reads endpoint, region, and credentials directly from the standard
+AWS environment variables below. The dataset URI determines the bucket and path.
+
+### Required environment variables for S3
+
+For private buckets using access-key authentication, configure these variables
+in the shell that launches the CLI:
+
+| Variable | Requirement | Purpose |
+|---|---|---|
+| `AWS_ENDPOINT_URL` | Required for custom S3-compatible services; optional for AWS S3 | S3 API endpoint, including `https://` (or `http://` for a local test server) |
+| `AWS_REGION` | Set to the bucket's region | Signing region; for example, `us-east-1` |
+| `AWS_ACCESS_KEY_ID` | Required for access-key authentication | S3 access key ID |
+| `AWS_SECRET_ACCESS_KEY` | Required for access-key authentication | Secret paired with the access key |
+| `AWS_SESSION_TOKEN` | Only for temporary credentials that require a session token | Session token; omit for long-lived access keys |
+
+Export the variables before launching the CLI; it does not load a `.env` file.
+
+Example for an S3-compatible service (replace the placeholders):
+
+```bash
+export AWS_ENDPOINT_URL="https://<s3-endpoint>"
+export AWS_REGION="<region>"
+export AWS_ACCESS_KEY_ID="<access-key-id>"
+export AWS_SECRET_ACCESS_KEY="<secret-access-key>"
+cargo run -- s3://<bucket>/<dataset-path> --sample-rows 32
+```
+
+Remote source datasets are read only. Candidate rewrites still use local
+temporary storage. External data-file base paths remain unsupported.
+Snapshot selection (`--branch` and `--version`) works the same as for local
+datasets.
+
+### S3-compatible storage smoke test
+
+Validated on 2026-09-29 against an existing private WARC dataset through
+an S3-compatible endpoint, with configuration supplied through environment variables:
+
+| Check | Result |
+|---|---|
+| Snapshot | Main branch, version 2 |
+| Dataset | 63,523 rows, 7 Lance data files, 20 columns |
+| Sample | 32 live rows |
+| Candidate measurements | 2,751 across the 7 files |
+| Blob handling | Descriptor column inspected; excluded from candidate rewrites |
+| Runtime | 31.7 seconds, local debug build; exit code 0 |
+
+This exercises remote manifest discovery, sampling, footer reads, and local
+candidate rewrites. The 32-row sample is a connectivity and execution smoke test,
+not a representative compression benchmark.
 
 ## Example: committed test dataset
 

@@ -1,12 +1,10 @@
 mod encoding_display;
 mod output;
 
-use std::path::PathBuf;
-
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use lance_compression_estimation::{
-    AnalyzeOptions, DEFAULT_SAMPLE_ROWS, analyze_dataset_with_options, probe::probe_local_dataset,
+    AnalyzeOptions, DEFAULT_SAMPLE_ROWS, analyze_dataset_with_options, probe::probe_dataset,
 };
 
 #[derive(Debug, Parser)]
@@ -15,8 +13,8 @@ use lance_compression_estimation::{
     about = "Inspect a Lance dataset snapshot for compression opportunities"
 )]
 struct Args {
-    /// Local Lance dataset directory.
-    dataset: PathBuf,
+    /// Local dataset directory or s3:// dataset URI.
+    dataset: String,
 
     /// Dataset branch. Defaults to main.
     #[arg(long, default_value = "main")]
@@ -52,8 +50,7 @@ enum Output {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let probe =
-        probe_local_dataset(&args.dataset, &args.branch, args.version, args.sample_rows).await?;
+    let probe = probe_dataset(&args.dataset, &args.branch, args.version, args.sample_rows).await?;
     let report = analyze_dataset_with_options(
         probe,
         AnalyzeOptions {

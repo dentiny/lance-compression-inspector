@@ -77,7 +77,7 @@ fn upgrade_suggestion(
 /// Estimate file size in `target` format with unchanged writer controls.
 /// Scale each column's current bytes by target/current baseline sample bytes,
 /// then add the existing non-column overhead unchanged.
-/// Return None if any column lacks either baseline measurement.
+/// Keep Blob bytes unchanged; return None if a non-Blob column lacks a baseline.
 /// A zero-byte current baseline keeps that column's size unchanged.
 fn projected_file_size(probe: &ProbeReport, target: EncodingFileVersion) -> Option<u64> {
     let fixed_overhead = probe.file_size_bytes.saturating_sub(
@@ -91,6 +91,10 @@ fn projected_file_size(probe: &ProbeReport, target: EncodingFileVersion) -> Opti
         .columns
         .iter()
         .try_fold(fixed_overhead, |total, column| {
+            // Blob bytes stay unchanged; Blob columns have no candidate measurements.
+            if column.has_blob {
+                return Some(total.saturating_add(column.on_disk_bytes));
+            }
             let current = baseline_bytes(column, probe.file_version)?;
             let target = baseline_bytes(column, target)?;
             Some(total.saturating_add(project_bytes(column.on_disk_bytes, target, current)))

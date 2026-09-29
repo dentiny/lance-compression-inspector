@@ -33,6 +33,22 @@ pub(super) async fn attach_data_file_measurements(
     if sample.num_rows() == 0 {
         return Ok(());
     }
+    // Blob columns are not candidates. Their sampled descriptors also refer to
+    // source storage and cannot be written as values in a temporary dataset.
+    let column_indices = sample
+        .schema()
+        .fields()
+        .iter()
+        .enumerate()
+        .filter(|(_, field)| {
+            report
+                .columns
+                .iter()
+                .any(|column| column.path == field.name().as_str() && !column.has_blob)
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let sample = sample.project(&column_indices)?;
     let batches = vec![sample.clone()];
     let measured_rows = sample.num_rows() as u64;
     let schema = sample.schema();

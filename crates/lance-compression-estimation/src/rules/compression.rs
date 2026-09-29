@@ -2,8 +2,8 @@ use std::cmp::Ordering;
 
 use crate::model::{
     Action, AnalyzeOptions, CandidateScore, ColumnProfile, EncodingFileVersion,
-    EncodingMeasurement, EncodingPlan, EstimateBasis, GeneralCompression, Location,
-    ProbeReport, SavingsEstimate, Severity, StructuralEncoding, Suggestion, ValueEncoding,
+    EncodingMeasurement, EncodingPlan, EstimateBasis, GeneralCompression, Location, ProbeReport,
+    SavingsEstimate, Severity, StructuralEncoding, Suggestion, ValueEncoding,
 };
 
 /// Evaluate measured encoding plans in top-level column order.
@@ -209,6 +209,10 @@ fn projected_file_for_version(
         .columns
         .iter()
         .try_fold(fixed_overhead, |total, column| {
+            // Blob bytes stay unchanged; Blob columns have no candidate measurements.
+            if column.has_blob {
+                return Some(total.saturating_add(column.on_disk_bytes));
+            }
             let source_measurement = column
                 .encoding_measurements
                 .iter()
@@ -377,6 +381,47 @@ mod tests {
         let mut probe = report(100);
         probe.columns[0].has_blob = true;
         assert!(evaluate_encoding_plans(&probe, AnalyzeOptions::default()).is_empty());
+    }
+
+    #[test]
+    fn unmeasured_blob_preserves_other_column_suggestions_and_file_bytes() {
+        let mut probe = report(100);
+        probe.file_size_bytes = 1_000;
+        let mut blob = probe.columns[0].clone();
+        blob.index = 1;
+        blob.path = "body".into();
+        blob.has_blob = true;
+        blob.on_disk_bytes = 800;
+        blob.encoding_measurements.clear();
+        probe.columns.push(blob);
+
+        let suggestions = evaluate_encoding_plans(&probe, AnalyzeOptions::default());
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].location, column_location(&probe.columns[0]));
+        let winner = &suggestions[0].candidate_scores[0];
+        assert_eq!(winner.projected_column_bytes, 50);
+        // 50 candidate bytes + 800 Blob bytes + 100 bytes of file overhead.
+        assert_eq!(winner.projected_file_bytes, 950);
+        assert_eq!(suggestions[0].estimate.as_ref().unwrap().lower_bytes, 50);
+
+        // Format migration also keeps the unmeasured Blob contribution.
+        probe.file_version = EncodingFileVersion::V2_2;
+        let mut source_baseline = probe.columns[0].encoding_measurements[0].clone();
+        source_baseline.plan = EncodingPlan::baseline(EncodingFileVersion::V2_2);
+        source_baseline.encoded_bytes = 200;
+        probe.columns[0].encoding_measurements.push(source_baseline);
+        let upgrades = crate::rules::file_version::evaluate_file_versions(&probe);
+        match &upgrades[0].action {
+            Action::RewriteFileVersion {
+                projected_file_bytes,
+                size_delta_bytes,
+                ..
+            } => {
+                assert_eq!(*projected_file_bytes, Some(950));
+                assert_eq!(*size_delta_bytes, Some(50));
+            }
+            action => panic!("unexpected action: {action:?}"),
+        }
     }
 
     #[test]
