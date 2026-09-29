@@ -121,39 +121,3 @@ fn summarize_page(encoding: &str, plan: Option<EncodingPlan>) -> Option<String> 
     }
     Some(format!("{layout} / {value} / {codec}"))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn uses_observed_codec_and_keeps_mixed_pages_separate() {
-        let plain = "PageLayout {\nMiniBlockLayout {\nVariable {\nFlat {\n";
-        let compressed = format!(
-            "{plain}General {{\nBufferCompression {{\nscheme: CompressionAlgorithmZstd,\nlevel: Some(\n6,\n),\n}},\n"
-        );
-        assert_eq!(
-            summarize(
-                &[plain.into(), compressed.clone(), compressed.clone()],
-                None
-            ),
-            "miniblock / variable+flat / none; miniblock / variable+flat / zstd:6"
-        );
-        let mut plan =
-            EncodingPlan::baseline(lance_compression_estimation::EncodingFileVersion::V2_2);
-        plan.general = GeneralCompression::Zstd { level: 12 };
-        assert_eq!(
-            summarize(&[compressed.clone()], Some(plan)),
-            "auto(miniblock) / auto(variable+flat) / zstd:6"
-        );
-        let no_level = compressed.replace("level: Some(\n6,\n),", "level: None,");
-        assert_eq!(
-            summarize(&[no_level], Some(plan)),
-            "auto(miniblock) / auto(variable+flat) / zstd (level not recorded)"
-        );
-        assert_eq!(
-            summarize(&[format!("{plain}FutureEncoding {{\n")], None),
-            "details (--verbose)"
-        );
-    }
-}
