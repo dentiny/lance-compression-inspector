@@ -2830,6 +2830,7 @@ dependencies = [
  "opendal",
  "serde",
  "tempfile",
+ "tokio",
  "url",
 ]
 

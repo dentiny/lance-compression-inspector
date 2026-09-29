@@ -69,7 +69,7 @@ pub struct ProbeReport {
 pub struct ColumnProfile {
     /// Zero-based top-level field index in this file's schema; not a physical-column ID.
     pub index: usize,
-    /// Top-level field name used to match the target of a sampled rewrite.
+    /// Current top-level field name; physical fields are matched by stable field ID.
     pub path: String,
     /// Display representation of the logical Arrow data type.
     pub data_type: String,
@@ -86,7 +86,7 @@ pub struct ColumnProfile {
     pub has_blob: bool,
     /// Measurements from the shared dataset sample. Each plan changes
     /// writer controls only for this top-level field; empty if no measurements
-    /// were collected (for example, sampling was disabled or the file is legacy).
+    /// were collected (for example, sampling was disabled or the nested schema changed).
     pub encoding_measurements: Vec<EncodingMeasurement>,
     /// Sorted, deduplicated page-encoding descriptions retained for inspection,
     /// as returned by Lance without parsing them into a separate tag vocabulary.

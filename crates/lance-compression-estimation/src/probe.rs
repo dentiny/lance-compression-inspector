@@ -11,8 +11,8 @@ mod storage;
 mod type_utils;
 
 pub use encoding_candidates::candidate_plans_for_type;
-use sampling::attach_data_file_measurements;
 pub use sampling::sample_dataset;
+use sampling::{MeasurementCache, attach_data_file_measurements};
 
 use std::{collections::BTreeSet, path::Path as FsPath, sync::Arc};
 
@@ -96,6 +96,7 @@ pub async fn probe_dataset(
         None
     };
     let mut files = Vec::with_capacity(relative_paths.len());
+    let mut measurements = MeasurementCache::default();
     for relative_path in relative_paths {
         let root_relative = object_store::path::Path::parse(format!("{root}/{relative_path}"))?;
         let (data_path, relative_source) = match store.inner.head(&root_relative).await {
@@ -113,9 +114,31 @@ pub async fn probe_dataset(
         } else {
             format!("{source}/{relative_source}")
         };
-        let mut report = probe_file(store.clone(), data_path, file_source).await?;
+        let (mut report, file_schema) = probe_file(store.clone(), data_path, file_source).await?;
+        // Match stable IDs, not names: deleted fields remain in old physical files.
+        // Their bytes stay in the fixed overhead of the projection.
+        report.columns.retain_mut(|column| {
+            let source_field = &file_schema.fields[column.index];
+            let Some(current) = dataset
+                .schema()
+                .fields
+                .iter()
+                .find(|f| f.id == source_field.id)
+            else {
+                return false;
+            };
+            column.path = current.name.clone();
+            true
+        });
         if let Some(sample) = &sample {
-            attach_data_file_measurements(sample, &mut report).await?;
+            attach_data_file_measurements(
+                sample,
+                dataset.schema(),
+                &file_schema,
+                &mut report,
+                &mut measurements,
+            )
+            .await?;
         }
         files.push(report);
     }
@@ -144,22 +167,39 @@ pub async fn probe_local_file(source: impl AsRef<FsPath>) -> Result<ProbeReport>
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("file path is not valid UTF-8"))?;
     let (store, object_path) = ObjectStore::from_uri(uri).await?;
-    probe_file(store, object_path, canonical.display().to_string()).await
+    Ok(
+        probe_file(store, object_path, canonical.display().to_string())
+            .await?
+            .0,
+    )
 }
 
 async fn probe_file(
     store: Arc<ObjectStore>,
     object_path: object_store::path::Path,
     source: String,
-) -> Result<ProbeReport> {
+) -> Result<(ProbeReport, lance_core::datatypes::Schema)> {
     let scheduler = ScanScheduler::new(store, SchedulerConfig::new(SCAN_IO_BUFFER_SIZE_BYTES));
     let file_scheduler = scheduler
         .open_file(&object_path, &CachedFileSize::unknown())
         .await
         .with_context(|| format!("cannot open Lance file {source}"))?;
-    let metadata = FileReader::read_all_metadata(&file_scheduler)
-        .await
-        .with_context(|| format!("cannot read Lance metadata from {source}"))?;
+    let metadata = match FileReader::read_all_metadata(&file_scheduler).await {
+        Err(lance_core::Error::VersionConflict {
+            major_version,
+            minor_version,
+            ..
+        }) if matches!(
+            ConcreteFileVersion::from_footer_numbers(major_version, minor_version),
+            Ok(ConcreteFileVersion::V1)
+        ) =>
+        {
+            anyhow::bail!(
+                "legacy Lance v1 is not supported; supported file formats are 2.0–2.3: {source}"
+            );
+        }
+        result => result.with_context(|| format!("cannot read Lance metadata from {source}"))?,
+    };
 
     let file_schema = metadata::restore_blob_children(&metadata.file_schema);
     let mut physical_index: usize = 0;
@@ -214,21 +254,24 @@ async fn probe_file(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    Ok(ProbeReport {
-        source,
-        file_version: match metadata.version {
-            ConcreteFileVersion::V1 => EncodingFileVersion::V1,
-            ConcreteFileVersion::V2_0 => EncodingFileVersion::V2_0,
-            ConcreteFileVersion::V2_1 => EncodingFileVersion::V2_1,
-            ConcreteFileVersion::V2_2 => EncodingFileVersion::V2_2,
-            ConcreteFileVersion::V2_3 => EncodingFileVersion::V2_3,
+    Ok((
+        ProbeReport {
+            source,
+            file_version: match metadata.version {
+                ConcreteFileVersion::V1 => EncodingFileVersion::V1,
+                ConcreteFileVersion::V2_0 => EncodingFileVersion::V2_0,
+                ConcreteFileVersion::V2_1 => EncodingFileVersion::V2_1,
+                ConcreteFileVersion::V2_2 => EncodingFileVersion::V2_2,
+                ConcreteFileVersion::V2_3 => EncodingFileVersion::V2_3,
+            },
+            file_size_bytes: metadata.file_size_bytes,
+            data_bytes: metadata.num_data_bytes,
+            rows: metadata.num_rows,
+            unsupported_nested_targets: nested_field_paths(&file_schema),
+            columns,
         },
-        file_size_bytes: metadata.file_size_bytes,
-        data_bytes: metadata.num_data_bytes,
-        rows: metadata.num_rows,
-        unsupported_nested_targets: nested_field_paths(&file_schema),
-        columns,
-    })
+        file_schema,
+    ))
 }
 
 // Use Lance's schema predicate rather than classifying every page encoding.
