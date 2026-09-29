@@ -1,8 +1,16 @@
-//! Footer-only probing with Lance's native encoding descriptions.
+//! Probe dataset snapshots and standalone Lance file metadata.
+//!
+//! Encoding descriptions come directly from Lance and are preserved for
+//! reporting. Sampling and scoring do not depend on a custom encoding taxonomy.
 
-use std::path::Path as FsPath;
+mod sampling;
+
+pub use sampling::sample_dataset;
+
+use std::{collections::BTreeSet, path::Path as FsPath};
 
 use anyhow::{Context, Result};
+use lance::dataset::builder::DatasetBuilder;
 use lance_file::reader::{FileReader, describe_encoding};
 use lance_file::version::ConcreteFileVersion;
 use lance_io::{
@@ -11,10 +19,80 @@ use lance_io::{
     utils::CachedFileSize,
 };
 
-use crate::{ColumnProfile, EncodingFileVersion, ProbeReport};
+use crate::{ColumnProfile, DatasetProbeReport, EncodingFileVersion, ProbeReport};
 
 /// Maximum buffered I/O per scan scheduler (256 MiB).
 const SCAN_IO_BUFFER_SIZE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Resolve a local dataset snapshot from its manifest and probe every active
+/// Lance data file. `version=None` selects the latest version on `branch`.
+pub async fn probe_local_dataset(
+    source: impl AsRef<FsPath>,
+    branch: &str,
+    version: Option<u64>,
+) -> Result<DatasetProbeReport> {
+    let source = source.as_ref();
+    let canonical = source
+        .canonicalize()
+        .with_context(|| format!("cannot resolve dataset {}", source.display()))?;
+    let uri = canonical
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("dataset path is not valid UTF-8"))?;
+    let dataset = DatasetBuilder::from_uri(uri)
+        .with_branch(branch, version)
+        .load()
+        .await
+        .with_context(|| {
+            let version = version.map_or_else(|| "latest".into(), |value| value.to_string());
+            format!(
+                "cannot open Lance dataset {} at branch {branch}, version {version}",
+                canonical.display()
+            )
+        })?;
+
+    let fragments = dataset.iter_fragments().collect::<Vec<_>>();
+    let physical_rows = fragments
+        .iter()
+        .filter_map(|fragment| fragment.physical_rows)
+        .map(|rows| rows as u64)
+        .sum();
+    let mut relative_paths = BTreeSet::new();
+    for fragment in &fragments {
+        for data_file in fragment.referenced_lance_files() {
+            if data_file.base_id.is_some() {
+                anyhow::bail!(
+                    "external data file base paths are not supported yet: {}",
+                    data_file.path
+                );
+            }
+            relative_paths.insert(data_file.path.clone());
+        }
+    }
+
+    let mut files = Vec::with_capacity(relative_paths.len());
+    for relative_path in relative_paths {
+        let root_relative = canonical.join(&relative_path);
+        let data_path = if root_relative.exists() {
+            root_relative
+        } else {
+            canonical.join("data").join(relative_path)
+        };
+        files.push(probe_local_file(&data_path).await?);
+    }
+
+    Ok(DatasetProbeReport {
+        source: canonical.display().to_string(),
+        branch: dataset
+            .manifest
+            .branch
+            .clone()
+            .unwrap_or_else(|| "main".into()),
+        manifest_version: dataset.manifest.version,
+        fragment_count: fragments.len(),
+        physical_rows,
+        files,
+    })
+}
 
 /// Probe a local standalone Lance data file without decoding column values.
 pub async fn probe_local_file(source: impl AsRef<FsPath>) -> Result<ProbeReport> {

@@ -2,9 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Maximum physical rows sampled uniformly without replacement from each
-/// active Lance data file; this is not a per-fragment, per-page, or
-/// per-row-group limit.
+/// Maximum live rows sampled from the selected dataset snapshot.
 pub const DEFAULT_SAMPLE_ROWS: usize = 16_384;
 
 /// Metadata and sample measurements for one resolved dataset snapshot.
@@ -86,7 +84,7 @@ pub struct ColumnProfile {
     /// Whether this field or any child stores Blob payloads outside its column buffers.
     /// Such columns are excluded from compression recommendations.
     pub has_blob: bool,
-    /// Measurements from this data file's bounded row sample. Each plan changes
+    /// Measurements from the shared dataset sample. Each plan changes
     /// writer controls only for this top-level field; empty if no measurements
     /// were collected (for example, sampling was disabled or the file is legacy).
     pub encoding_measurements: Vec<EncodingMeasurement>,
@@ -264,8 +262,8 @@ impl EncodingPlan {
 pub struct EncodingMeasurement {
     /// Writer configuration requested for this target field in the sampled rewrite.
     pub plan: EncodingPlan,
-    /// Actual physical rows re-encoded, capped by both the per-file sampling limit
-    /// and the number of rows available; not the full file's row count.
+    /// Live dataset rows re-encoded, capped by the dataset sampling limit
+    /// and available live rows; not the full file's row count.
     pub sample_rows: u64,
     /// Measured target-column page and shared-buffer bytes in the temporary
     /// rewrite. Excludes other columns and file overhead; not a full-column projection.
@@ -282,7 +280,7 @@ pub struct EncodingMeasurement {
 pub struct CandidateScore {
     /// Candidate writer configuration for one top-level column in the target format.
     pub plan: EncodingPlan,
-    /// Actual physical rows used for this candidate's measurement.
+    /// Sampled live dataset rows used for this candidate's measurement.
     pub sample_rows: u64,
     /// Measured bytes for this column in the sample rewrite, before extrapolation
     /// to the full column; excludes other columns and file overhead.
