@@ -21,7 +21,6 @@ arrow-schema = "58"
 clap = { version = "4", features = ["derive"] }
 lance = { git = "https://github.com/lance-format/lance.git", rev = "b94b20c785caadc3c95239af0108eaed8b35a118", default-features = false }
 lance-core = { git = "https://github.com/lance-format/lance.git", rev = "b94b20c785caadc3c95239af0108eaed8b35a118" }
-lance-encoding = { git = "https://github.com/lance-format/lance.git", rev = "b94b20c785caadc3c95239af0108eaed8b35a118" }
 lance-file = { git = "https://github.com/lance-format/lance.git", rev = "b94b20c785caadc3c95239af0108eaed8b35a118" }
 lance-io = { git = "https://github.com/lance-format/lance.git", rev = "b94b20c785caadc3c95239af0108eaed8b35a118", default-features = false }
 serde = { version = "1", features = ["derive"] }
