@@ -25,11 +25,11 @@ struct Args {
     #[arg(long)]
     version: Option<u64>,
 
-    /// Maximum visible rows sampled per fragment for each compression candidate.
+    /// Maximum visible rows sampled per fragment for each encoding plan.
     #[arg(long, default_value_t = DEFAULT_SAMPLE_ROWS)]
     sample_rows: usize,
 
-    /// Include decode-cost multipliers when ranking compression candidates.
+    /// Include decode-cost multipliers when ranking encoding plans.
     #[arg(long)]
     consider_decoding_penalty: bool,
 

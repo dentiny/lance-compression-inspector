@@ -105,6 +105,7 @@ mod tests {
             file_size_bytes: 1024,
             data_bytes: 1024,
             rows: 100,
+            unsupported_nested_targets: vec![],
             columns: vec![ColumnProfile {
                 index: 0,
                 path: "nested".into(),
@@ -113,8 +114,7 @@ mod tests {
                 on_disk_bytes: 1024,
                 field_metadata: BTreeMap::new(),
                 encoding_tags: tags.iter().copied().collect::<BTreeSet<_>>(),
-                observed_compressions: BTreeSet::new(),
-                compression_measurements: vec![],
+                encoding_measurements: vec![],
                 raw_page_encodings: vec![],
             }],
         }

@@ -35,6 +35,9 @@ pub struct ProbeReport {
     pub file_size_bytes: u64,
     pub data_bytes: u64,
     pub rows: u64,
+    /// Nested child paths are reported explicitly but are not independently
+    /// rewritten; their top-level parent is measured as one logical column.
+    pub unsupported_nested_targets: Vec<String>,
     pub columns: Vec<ColumnProfile>,
 }
 
@@ -48,10 +51,9 @@ pub struct ColumnProfile {
     pub field_metadata: BTreeMap<String, String>,
     /// Normalized tags discovered by walking every page's encoding description.
     pub encoding_tags: BTreeSet<EncodingTag>,
-    /// General-compression configurations observed across this column's pages.
-    pub observed_compressions: BTreeSet<EncodingCandidate>,
-    /// Sizes measured by re-encoding a bounded dataset sample.
-    pub compression_measurements: Vec<CompressionMeasurement>,
+    /// Sizes measured by re-encoding a bounded dataset sample. Each plan is
+    /// applied only to this top-level logical field.
+    pub encoding_measurements: Vec<EncodingMeasurement>,
     /// Lossless fallback for new or unknown Lance encodings.
     pub raw_page_encodings: Vec<String>,
 }
@@ -124,8 +126,8 @@ pub enum Severity {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Action {
-    ProbeEncodings {
-        candidates: Vec<EncodingCandidate>,
+    ProbeEncodingPlans {
+        plans: Vec<EncodingPlan>,
     },
     RewriteFileVersion {
         target: String,
@@ -134,64 +136,85 @@ pub enum Action {
     InspectUnknownEncoding,
 }
 
+/// Structural layout selection. `Auto` leaves the source field's metadata
+/// untouched and therefore represents Lance's existing/default choice.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum StructuralEncoding {
+    Auto,
+    MiniBlock,
+    FullZip,
+    Sparse,
+}
+
+/// Value encodings with public writer controls. Bitpacking and constant
+/// encodings deliberately remain part of `Auto`: Lance does not expose
+/// controls that can honestly force them.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum ValueEncoding {
+    Auto,
+    Rle,
+    Fsst,
+    ByteStreamSplit,
+    Dictionary,
+    PackedStruct,
+}
+
+/// General-purpose compression layered over the structural/value encoding.
+/// `Baseline` preserves source metadata; `None` explicitly disables it.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum GeneralCompression {
+    Baseline,
+    None,
+    Lz4,
+    Zstd { level: i32 },
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "lowercase")]
-pub enum CompressionAlgorithm {
-    Uncompressed,
-    Lz4,
-    Zstd,
+pub enum EncodingFileVersion {
+    #[serde(rename = "2.2")]
+    V2_2,
+    #[serde(rename = "2.3")]
+    V2_3,
 }
 
-/// A compression algorithm and level form one distinct encoding candidate.
+/// A measurable, version-aware writer configuration for one top-level field.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct EncodingCandidate {
-    pub algorithm: CompressionAlgorithm,
-    pub level: Option<i32>,
+pub struct EncodingPlan {
+    pub structural: StructuralEncoding,
+    pub value: ValueEncoding,
+    pub general: GeneralCompression,
+    pub file_version: EncodingFileVersion,
 }
 
-pub const DEFAULT_ENCODING_CANDIDATES: [EncodingCandidate; 7] = [
-    EncodingCandidate {
-        algorithm: CompressionAlgorithm::Uncompressed,
-        level: None,
-    },
-    EncodingCandidate {
-        algorithm: CompressionAlgorithm::Lz4,
-        level: None,
-    },
-    EncodingCandidate {
-        algorithm: CompressionAlgorithm::Zstd,
-        level: Some(1),
-    },
-    EncodingCandidate {
-        algorithm: CompressionAlgorithm::Zstd,
-        level: Some(3),
-    },
-    EncodingCandidate {
-        algorithm: CompressionAlgorithm::Zstd,
-        level: Some(6),
-    },
-    EncodingCandidate {
-        algorithm: CompressionAlgorithm::Zstd,
-        level: Some(9),
-    },
-    EncodingCandidate {
-        algorithm: CompressionAlgorithm::Zstd,
-        level: Some(12),
-    },
-];
+impl EncodingPlan {
+    pub const fn baseline(file_version: EncodingFileVersion) -> Self {
+        Self {
+            structural: StructuralEncoding::Auto,
+            value: ValueEncoding::Auto,
+            general: GeneralCompression::Baseline,
+            file_version,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CompressionMeasurement {
-    pub candidate: EncodingCandidate,
+pub struct EncodingMeasurement {
+    pub plan: EncodingPlan,
     pub sample_rows: u64,
     pub encoded_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CandidateScore {
-    pub candidate: EncodingCandidate,
+    pub plan: EncodingPlan,
     pub sample_rows: u64,
     pub encoded_bytes: u64,
+    pub projected_column_bytes: u64,
+    pub projected_file_bytes: u64,
     pub consideration_factor: f64,
     pub decoding_penalty: f64,
     pub effective_score: f64,

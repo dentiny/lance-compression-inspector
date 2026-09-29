@@ -8,10 +8,20 @@ The workspace separates the reusable analysis library from presentation:
   measured sample comparisons. Probe and estimation remain separate Rust modules.
 - `lance-compression-cli`: human and versioned JSON reports.
 
-Lance leaves general ZSTD/LZ4 compression disabled by default. This tool treats
-that as a valid baseline, not an error. It re-encodes a bounded row sample with
-LZ4 and several `(ZSTD, level)` candidates in parallel, then compares measured
-per-column bytes.
+The estimator models a full `EncodingPlan` instead of a flat codec: structural
+layout (`auto`, miniblock, fullzip, or 2.3-only sparse), controllable value
+encoding (RLE, FSST, byte-stream split, dictionary, or packed struct), general
+compression (metadata-preserving baseline, none, LZ4, or ZSTD levels
+1/3/6/9/12), and target file version. Bitpacking and constant encoding remain
+automatic because Lance does not expose honest writer controls for them.
+
+Candidate selection is deliberately bounded rather than Cartesian. Per
+top-level field it first measures the baseline, every general compressor, and
+each type/version-compatible structural or value axis candidate. It retains the
+best structural and value result, optionally combines those two, and measures
+that beam with none, LZ4, ZSTD-3, and ZSTD-9 (BSS uses only real compressors;
+FSST cannot be combined because it shares Lance's compression control). This
+keeps the worst-case set to roughly two dozen rewrites per field.
 
 Ranking uses measured sample bytes by default. `--consider-decoding-penalty` enables
 DuckDB-inspired consideration and decode-cost factors; these remain explicit in
@@ -27,6 +37,12 @@ Every page's raw encoding description is preserved. Known structural, logical,
 physical, and general-compression layers are also normalized into composable
 tags. New Lance encodings therefore remain visible instead of being silently
 misclassified.
+
+Each rewrite changes metadata only on its target top-level field and preserves
+schema and metadata for every other field. Reports aggregate all physical pages
+belonging to that logical field. Nested child paths are intentionally not
+offered as independent targets; their parent top-level field is measured as a
+whole, avoiding false per-child estimates.
 
 ## Usage
 

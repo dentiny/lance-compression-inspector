@@ -5,7 +5,8 @@ set `lance-encoding:compression=none`. It includes:
 
 - unique, structurally repetitive JSON strings for ZSTD experiments;
 - low-cardinality strings for dictionary/RLE interaction;
-- smooth fixed-size float vectors for BSS plus general-compression experiments;
+- smooth fixed-size float vectors for general-compression experiments (BSS
+  candidates are intentionally limited to scalar Float32/Float64 columns);
 - high-cardinality binary payloads;
 - sequential integers for bit-packing interaction.
 
