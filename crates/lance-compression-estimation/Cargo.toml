@@ -12,5 +12,4 @@ lance.workspace = true
 lance-core.workspace = true
 lance-file.workspace = true
 lance-io.workspace = true
-object_store.workspace = true
 serde.workspace = true

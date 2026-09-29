@@ -7,7 +7,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path as FsPath,
-    sync::Arc,
 };
 
 use anyhow::{Context, Result};
@@ -18,7 +17,6 @@ use lance_io::{
     scheduler::{ScanScheduler, SchedulerConfig},
     utils::CachedFileSize,
 };
-use object_store::path::Path;
 
 use crate::{ColumnProfile, DatasetProbeReport, EncodingTag, ProbeReport, REPORT_SCHEMA_VERSION};
 
@@ -99,10 +97,10 @@ pub async fn probe_local_file(source: impl AsRef<FsPath>) -> Result<ProbeReport>
     let canonical = source
         .canonicalize()
         .with_context(|| format!("cannot resolve {}", source.display()))?;
-    let object_path = Path::from_filesystem_path(&canonical)
-        .map_err(|error| anyhow::anyhow!("invalid local path {}: {error}", canonical.display()))?;
-
-    let store = Arc::new(ObjectStore::local());
+    let uri = canonical
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("file path is not valid UTF-8"))?;
+    let (store, object_path) = ObjectStore::from_uri(uri).await?;
     let scheduler = ScanScheduler::new(store, SchedulerConfig::new(256 * 1024 * 1024));
     let file_scheduler = scheduler
         .open_file(&object_path, &CachedFileSize::unknown())
