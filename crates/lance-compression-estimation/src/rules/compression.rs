@@ -58,7 +58,7 @@ fn check_column(
         });
     }
 
-    let source_version = encoding_file_version(&probe.file_version)?;
+    let source_version = probe.file_version;
     let target_version = encoding_target_version(source_version);
     let source_measurement = column.encoding_measurements.iter().find(|measurement| {
         is_baseline(measurement.plan) && measurement.plan.file_version == source_version
@@ -203,17 +203,6 @@ fn is_baseline(plan: EncodingPlan) -> bool {
     plan.structural == StructuralEncoding::Auto
         && plan.value == ValueEncoding::Auto
         && plan.general == GeneralCompression::Baseline
-}
-
-fn encoding_file_version(version: &str) -> Option<EncodingFileVersion> {
-    match version {
-        "0.1" | "V1" => Some(EncodingFileVersion::V1),
-        "2.0" | "V2_0" => Some(EncodingFileVersion::V2_0),
-        "2.1" | "V2_1" => Some(EncodingFileVersion::V2_1),
-        "2.2" | "V2_2" => Some(EncodingFileVersion::V2_2),
-        "2.3" | "V2_3" => Some(EncodingFileVersion::V2_3),
-        _ => None,
-    }
 }
 
 fn encoding_target_version(source: EncodingFileVersion) -> EncodingFileVersion {
@@ -377,7 +366,7 @@ mod tests {
             .collect();
         ProbeReport {
             source: "test.lance".into(),
-            file_version: "2.3".into(),
+            file_version: EncodingFileVersion::V2_3,
             file_size_bytes: 100,
             data_bytes: 100,
             rows: 1_024,

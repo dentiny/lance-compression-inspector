@@ -30,7 +30,7 @@ pub struct DatasetAnalysisReport {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProbeReport {
     pub source: String,
-    pub file_version: String,
+    pub file_version: EncodingFileVersion,
     pub file_size_bytes: u64,
     pub data_bytes: u64,
     pub rows: u64,
@@ -186,6 +186,18 @@ pub enum EncodingFileVersion {
     V2_2,
     #[serde(rename = "2.3")]
     V2_3,
+}
+
+impl std::fmt::Display for EncodingFileVersion {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::V1 => "0.1",
+            Self::V2_0 => "2.0",
+            Self::V2_1 => "2.1",
+            Self::V2_2 => "2.2",
+            Self::V2_3 => "2.3",
+        })
+    }
 }
 
 /// A measurable, version-aware writer configuration for one top-level field.

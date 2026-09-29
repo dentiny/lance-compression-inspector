@@ -17,7 +17,7 @@ use lance::{
 use lance_core::cache::LanceCache;
 use lance_encoding::decoder::{DecoderPlugins, FilterExpression};
 use lance_file::reader::{FileReader, FileReaderOptions, describe_encoding};
-use lance_file::version::LanceFileVersion;
+use lance_file::version::{ConcreteFileVersion, LanceFileVersion};
 use lance_io::{
     ReadBatchParams,
     object_store::ObjectStore,
@@ -111,8 +111,7 @@ async fn attach_data_file_measurements(
     sample_rows: usize,
     report: &mut ProbeReport,
 ) -> Result<()> {
-    let source_plan_version = parse_encoding_file_version(&report.file_version)
-        .with_context(|| format!("unsupported Lance file version {}", report.file_version))?;
+    let source_plan_version = report.file_version;
     if source_plan_version == EncodingFileVersion::V1 {
         return Ok(());
     }
@@ -228,17 +227,6 @@ async fn sample_data_file(data_path: &FsPath, sample_rows: usize) -> Result<Vec<
         .try_collect()
         .await
         .map_err(Into::into)
-}
-
-fn parse_encoding_file_version(version: &str) -> Option<EncodingFileVersion> {
-    match version {
-        "0.1" | "V1" => Some(EncodingFileVersion::V1),
-        "2.0" | "V2_0" => Some(EncodingFileVersion::V2_0),
-        "2.1" | "V2_1" => Some(EncodingFileVersion::V2_1),
-        "2.2" | "V2_2" => Some(EncodingFileVersion::V2_2),
-        "2.3" | "V2_3" => Some(EncodingFileVersion::V2_3),
-        _ => None,
-    }
 }
 
 /// Generate the independent axis sweep for a top-level Arrow field.
@@ -646,7 +634,13 @@ pub async fn probe_local_file(source: impl AsRef<FsPath>) -> Result<ProbeReport>
 
     Ok(ProbeReport {
         source: canonical.display().to_string(),
-        file_version: metadata.version.to_string(),
+        file_version: match metadata.version {
+            ConcreteFileVersion::V1 => EncodingFileVersion::V1,
+            ConcreteFileVersion::V2_0 => EncodingFileVersion::V2_0,
+            ConcreteFileVersion::V2_1 => EncodingFileVersion::V2_1,
+            ConcreteFileVersion::V2_2 => EncodingFileVersion::V2_2,
+            ConcreteFileVersion::V2_3 => EncodingFileVersion::V2_3,
+        },
         file_size_bytes: metadata.file_size_bytes,
         data_bytes: metadata.num_data_bytes,
         rows: metadata.num_rows,
