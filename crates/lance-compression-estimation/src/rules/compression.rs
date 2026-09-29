@@ -6,11 +6,6 @@ use crate::model::{
     Severity, Suggestion,
 };
 
-// General compression has fixed per-page metadata and CPU costs. Below 8 MiB
-// per physical column, metadata-only savings estimates are usually too small
-// and noisy to justify an optimization recommendation.
-const MIN_GENERAL_COMPRESSION_BYTES: u64 = 8 * 1024 * 1024;
-
 // Each (algorithm, level) pair is scored as a distinct encoding candidate.
 // The ZSTD levels span fast, balanced, and high-compression operating points.
 const CANDIDATES: [EncodingCandidate; 6] = [
@@ -67,7 +62,7 @@ fn check_column(column: &ColumnProfile, options: AnalyzeOptions) -> Option<Sugge
 
     let has_codec = column.encoding_tags.contains(&EncodingTag::GeneralLz4)
         || column.encoding_tags.contains(&EncodingTag::GeneralZstd);
-    if has_codec || column.on_disk_bytes < MIN_GENERAL_COMPRESSION_BYTES {
+    if has_codec {
         return None;
     }
 
