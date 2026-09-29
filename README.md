@@ -47,7 +47,8 @@ Automatic choices retain their requested mode as `auto(actual)`, for example
 `auto(miniblock) / auto(variable+flat) / zstd:6`. Codec levels come from the
 written metadata; a missing ZSTD level is labeled `level not recorded`.
 Blob columns are identified using Lance's schema metadata and excluded from
-compression recommendations.
+compression recommendations. File-size projections keep Blob bytes unchanged
+so unmeasured Blob columns do not suppress recommendations for other columns.
 
 Each rewrite changes metadata only on its target top-level field and preserves
 schema and metadata for every other field. Reports aggregate all physical pages
