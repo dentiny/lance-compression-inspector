@@ -184,17 +184,19 @@ Changing only the file format produced these estimates:
 | 2.2 | 73.89 MiB | 47.33 KiB larger |
 | 2.3 (experimental) | 73.89 MiB | 47.33 KiB larger |
 
-The encoding recommendations were:
+The encoding recommendations were (six columns had savings; the sixth, `status`,
+saved 313.69 KiB and appears with `--verbose`):
 
 ```text
+  ENCODING CHANGES (top 5 of 6 by savings, --verbose for all)
+
   COLUMN     | CURRENT ENCODING                                                                                    | SUGGESTED ENCODING                                                                                                                        | FORMAT    | PROJECTED FILE | SAVINGS
   -----------+-----------------------------------------------------------------------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------+-----------+----------------+-----------------
-  row_id     | miniblock / flat / none                                                                             | auto(miniblock) / auto(bss+flat) / zstd:6                                                                                                 | 2.1 → 2.2 | 73.23 MiB      | 624.01 KiB (<1%)
-  status     | miniblock / flat+dictionary+variable / none                                                         | auto(miniblock) / auto(bss+flat+dictionary+variable) / zstd:12+lz4                                                                        | 2.1 → 2.2 | 73.53 MiB      | 313.69 KiB (<1%)
   event_json | miniblock / variable+flat / none                                                                    | auto(miniblock) / auto(variable+flat) / zstd:6                                                                                            | 2.1 → 2.2 | 58.60 MiB      | 15.24 MiB (20%)
-  payload    | miniblock / variable+flat / none                                                                    | auto(miniblock) / auto(variable+flat) / zstd:12                                                                                           | 2.1 → 2.2 | 64.06 MiB      | 9.78 MiB (13%)
   messages   | miniblock / bitpacking+flat+dictionary+variable / none; miniblock / bitpacking+flat+variable / none | auto(miniblock) / auto(bitpacking+flat+bss+dictionary+variable) / zstd:12+lz4; auto(miniblock) / auto(bitpacking+flat+variable) / zstd:12 | 2.1 → 2.2 | 62.09 MiB      | 11.75 MiB (15%)
+  payload    | miniblock / variable+flat / none                                                                    | auto(miniblock) / auto(variable+flat) / zstd:12                                                                                           | 2.1 → 2.2 | 64.06 MiB      | 9.78 MiB (13%)
   context    | miniblock / flat / none; miniblock / flat+dictionary+variable / none                                | auto(miniblock) / auto(bss+flat) / zstd:12; auto(miniblock) / auto(bss+flat+dictionary+variable) / zstd:12+lz4                            | 2.1 → 2.2 | 72.82 MiB      | 1.02 MiB (1%)
+  row_id     | miniblock / flat / none                                                                             | auto(miniblock) / auto(bss+flat) / zstd:6                                                                                                 | 2.1 → 2.2 | 73.23 MiB      | 624.01 KiB (<1%)
 ```
 
 The fixture test `fixture_nested_estimates_match_full_column_rewrites` checks
@@ -215,8 +217,9 @@ column**. `SAVINGS` compares the projected file with the original file, includin
 the format migration cost; these separate what-if results are not a combined
 rewrite result. Percentages use the original file size, not the column size.
 Positive savings below 1% remain visible and are labeled `<1%`. The default
-encoding table omits rows with no net file savings. JSON and verbose candidate
-estimates retain encoding-only savings within the target format.
+encoding table omits rows with no net file savings, sorts the rest by savings,
+and shows only the top five; `--verbose` shows every row. JSON and verbose
+candidate estimates retain encoding-only savings within the target format.
 
 These numbers extrapolate measured sample rewrites; the full source dataset was
 not rewritten. File-level overhead is held constant by the estimator. Sampling is
