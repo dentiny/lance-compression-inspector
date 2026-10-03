@@ -5,6 +5,7 @@ use lance_compression_estimation::{
 };
 
 const TOP_STORAGE_COLUMNS: usize = 10;
+const TOP_ENCODING_CHANGES: usize = 5;
 
 pub fn print_human(report: &DatasetAnalysisReport, verbose: bool) {
     println!(
@@ -155,7 +156,7 @@ fn print_file(report: &AnalysisReport, verbose: bool) {
     }) {
         print_non_plan_conclusion(suggestion);
     }
-    print_plan_table(report, &visible);
+    print_plan_table(report, &visible, verbose);
     if verbose {
         for suggestion in visible {
             print_details(suggestion);
@@ -227,7 +228,7 @@ fn print_format_table(suggestions: &[&Suggestion]) {
     print_table("FORMAT CHANGES", &headers, &rows);
 }
 
-fn print_plan_table(report: &AnalysisReport, suggestions: &[&Suggestion]) {
+fn print_plan_table(report: &AnalysisReport, suggestions: &[&Suggestion], verbose: bool) {
     let headers = [
         "COLUMN",
         "CURRENT ENCODING",
@@ -236,6 +237,19 @@ fn print_plan_table(report: &AnalysisReport, suggestions: &[&Suggestion]) {
         "PROJECTED FILE",
         "SAVINGS",
     ];
+    let mut suggestions = suggestions
+        .iter()
+        .filter(|suggestion| {
+            !suggestion.candidate_scores.is_empty()
+                && matches!(suggestion.location, Location::Column { .. })
+        })
+        .collect::<Vec<_>>();
+    suggestions.sort_by_key(|suggestion| suggestion.candidate_scores[0].projected_file_bytes);
+    let total = suggestions.len();
+    let truncated = !verbose && total > TOP_ENCODING_CHANGES;
+    if truncated {
+        suggestions.truncate(TOP_ENCODING_CHANGES);
+    }
     let rows = suggestions
         .iter()
         .filter_map(|suggestion| {
@@ -264,7 +278,14 @@ fn print_plan_table(report: &AnalysisReport, suggestions: &[&Suggestion]) {
             ])
         })
         .collect::<Vec<_>>();
-    print_table("ENCODING CHANGES", &headers, &rows);
+    let title = if truncated {
+        format!(
+            "ENCODING CHANGES (top {TOP_ENCODING_CHANGES} of {total} by savings, --verbose for all)"
+        )
+    } else {
+        "ENCODING CHANGES".into()
+    };
+    print_table(&title, &headers, &rows);
 }
 
 // Compare with the original file, including the format migration cost.
