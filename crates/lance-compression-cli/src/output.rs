@@ -1,6 +1,10 @@
+use std::collections::BTreeMap;
+
 use lance_compression_estimation::{
     Action, AnalysisReport, DatasetAnalysisReport, Location, Suggestion,
 };
+
+const TOP_STORAGE_COLUMNS: usize = 10;
 
 pub fn print_human(report: &DatasetAnalysisReport, verbose: bool) {
     println!(
@@ -12,8 +16,103 @@ pub fn print_human(report: &DatasetAnalysisReport, verbose: bool) {
         report.files.len()
     );
 
+    print_storage_table(report);
     for file in &report.files {
         print_file(file, verbose);
+    }
+}
+
+#[derive(Default)]
+struct ColumnStorage<'a> {
+    data_type: &'a str,
+    bytes: u64,
+    files: usize,
+    has_blob: bool,
+    encodings: Vec<String>,
+}
+
+// Columns are matched across files by name, so a renamed field appears once per name.
+fn aggregate_column_storage(report: &DatasetAnalysisReport) -> Vec<(&str, ColumnStorage<'_>)> {
+    let mut columns = BTreeMap::<&str, ColumnStorage>::new();
+    for file in &report.files {
+        for column in &file.probe.columns {
+            let entry = columns.entry(&column.path).or_default();
+            if entry.files == 0 {
+                entry.data_type = &column.data_type;
+            }
+            entry.bytes = entry.bytes.saturating_add(column.on_disk_bytes);
+            entry.files += 1;
+            entry.has_blob |= column.has_blob;
+            for encoding in &column.raw_page_encodings {
+                if !entry.encodings.contains(encoding) {
+                    entry.encodings.push(encoding.clone());
+                }
+            }
+        }
+    }
+    let mut columns = columns.into_iter().collect::<Vec<_>>();
+    columns.sort_by(|(a_path, a), (b_path, b)| b.bytes.cmp(&a.bytes).then(a_path.cmp(b_path)));
+    columns
+}
+
+fn print_storage_table(report: &DatasetAnalysisReport) {
+    let columns = aggregate_column_storage(report);
+    let total_file_bytes = report
+        .files
+        .iter()
+        .map(|file| file.probe.file_size_bytes)
+        .fold(0u64, u64::saturating_add);
+    let headers = [
+        "RANK",
+        "COLUMN",
+        "TYPE",
+        "ON DISK",
+        "SHARE",
+        "FILES",
+        "CURRENT ENCODING",
+    ];
+    let rows = columns
+        .iter()
+        .take(TOP_STORAGE_COLUMNS)
+        .enumerate()
+        .map(|(rank, (path, column))| {
+            vec![
+                (rank + 1).to_string(),
+                if column.has_blob {
+                    format!("{path} *")
+                } else {
+                    (*path).to_string()
+                },
+                column.data_type.to_string(),
+                human_bytes(column.bytes),
+                share(column.bytes, total_file_bytes),
+                format!("{}/{}", column.files, report.files.len()),
+                crate::encoding_display::summarize(&column.encodings, None),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let title = format!(
+        "TOP STORAGE COLUMNS ({} of {}, share of {} total file bytes)",
+        rows.len(),
+        columns.len(),
+        human_bytes(total_file_bytes)
+    );
+    print_table(&title, &headers, &rows);
+    if columns
+        .iter()
+        .take(TOP_STORAGE_COLUMNS)
+        .any(|(_, column)| column.has_blob)
+    {
+        println!("  * blob payloads stored outside column buffers are not counted");
+    }
+}
+
+fn share(bytes: u64, total: u64) -> String {
+    let percent = u128::from(bytes) * 100 / u128::from(total.max(1));
+    if bytes > 0 && percent == 0 {
+        "<1%".into()
+    } else {
+        format!("{percent}%")
     }
 }
 
