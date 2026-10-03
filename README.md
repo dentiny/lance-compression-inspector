@@ -65,6 +65,17 @@ belonging to the logical field. Nested child paths are intentionally not
 offered as independent targets; their parent top-level field is measured as a
 whole, avoiding false per-child estimates.
 
+The human report starts with a dataset-wide `TOP STORAGE COLUMNS` table listing
+the ten top-level columns with the most on-disk bytes. Each column's page and
+shared column-buffer bytes are summed across all active data files and ranked
+in descending order. `SHARE` divides those bytes by the total size of all data
+files, including file metadata and footers, so shares add up to less than 100%.
+`FILES` shows how many data files contain the column. Columns are grouped by
+name in this table, so a renamed field appears once under each name. Blob
+columns are marked with `*` because payloads stored outside column buffers are
+not counted. Sizes are physical and include rows that were logically deleted.
+The table is read from file metadata and does not depend on sampling.
+
 ## Usage
 
 ```console
@@ -145,6 +156,21 @@ dataset sample and size-only ranking (the decode-cost penalty was disabled).
 The fixture has 100,000 rows, five columns, and one 56.58 MiB data file in format
 2.1. The CLI completed in about 16.8 seconds in a local debug build, excluding
 compilation.
+
+The current storage breakdown, captured on 2026-10-02, shows that three columns
+account for about 98% of the file:
+
+```text
+  TOP STORAGE COLUMNS (5 of 5, share of 56.58 MiB total file bytes)
+
+  RANK | COLUMN     | TYPE                        | ON DISK    | SHARE | FILES | CURRENT ENCODING
+  -----+------------+-----------------------------+------------+-------+-------+--------------------------------------------
+  1    | embedding  | FixedSizeList(64 x Float32) | 24.41 MiB  | 43%   | 1/1   | fullzip / fixed-size-list+flat / none
+  2    | event_json | Utf8                        | 18.32 MiB  | 32%   | 1/1   | miniblock / variable+flat / none
+  3    | payload    | Binary                      | 12.70 MiB  | 22%   | 1/1   | miniblock / variable+flat / none
+  4    | row_id     | UInt64                      | 783.16 KiB | 1%    | 1/1   | miniblock / flat / none
+  5    | status     | Utf8                        | 391.63 KiB | <1%   | 1/1   | miniblock / flat+dictionary+variable / none
+```
 
 Changing only the file format produced these estimates:
 
