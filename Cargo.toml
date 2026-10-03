@@ -17,6 +17,7 @@ lance-compression-estimation = { path = "crates/lance-compression-estimation" }
 
 anyhow = "1"
 arrow-array = "58"
+arrow-buffer = "58"
 arrow-schema = "58"
 clap = { version = "4", features = ["derive"] }
 lance = { git = "https://github.com/lance-format/lance.git", rev = "b94b20c785caadc3c95239af0108eaed8b35a118", default-features = false }

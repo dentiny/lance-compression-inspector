@@ -63,7 +63,10 @@ Unsupported optional candidates are skipped with a diagnostic; source baseline
 and I/O failures remain errors. Reports aggregate all physical pages
 belonging to the logical field. Nested child paths are intentionally not
 offered as independent targets; their parent top-level field is measured as a
-whole, avoiding false per-child estimates.
+whole, avoiding false per-child estimates. Lance reads structural-layout and
+general-compression controls only from the field that owns each physical
+column, so candidates apply those controls to every nested field. Value
+encoding controls such as packed structs stay on the top-level field.
 
 The human report starts with a dataset-wide `TOP STORAGE COLUMNS` table listing
 the ten top-level columns with the most on-disk bytes. Each column's page and
@@ -151,43 +154,55 @@ Run the inspector on the fixture without regenerating it:
 cargo run --locked -- testdata/suboptimal.lance
 ```
 
-The following results were captured on 2026-09-29 with the default 16,384-row
+The following results were captured on 2026-10-02 with the default 16,384-row
 dataset sample and size-only ranking (the decode-cost penalty was disabled).
-The fixture has 100,000 rows, five columns, and one 56.58 MiB data file in format
-2.1. The CLI completed in about 16.8 seconds in a local debug build, excluding
-compilation.
+The fixture has 100,000 rows, seven columns, and one 73.84 MiB data file in
+format 2.1. The CLI completed in about 13 seconds in a local debug build,
+excluding compilation.
 
-The current storage breakdown, captured on 2026-10-02, shows that three columns
-account for about 98% of the file:
+The storage breakdown shows that four columns account for about 95% of the
+file (nested column types are abbreviated here):
 
 ```text
-  TOP STORAGE COLUMNS (5 of 5, share of 56.58 MiB total file bytes)
+  TOP STORAGE COLUMNS (7 of 7, share of 73.84 MiB total file bytes)
 
-  RANK | COLUMN     | TYPE                        | ON DISK    | SHARE | FILES | CURRENT ENCODING
-  -----+------------+-----------------------------+------------+-------+-------+--------------------------------------------
-  1    | embedding  | FixedSizeList(64 x Float32) | 24.41 MiB  | 43%   | 1/1   | fullzip / fixed-size-list+flat / none
-  2    | event_json | Utf8                        | 18.32 MiB  | 32%   | 1/1   | miniblock / variable+flat / none
-  3    | payload    | Binary                      | 12.70 MiB  | 22%   | 1/1   | miniblock / variable+flat / none
-  4    | row_id     | UInt64                      | 783.16 KiB | 1%    | 1/1   | miniblock / flat / none
-  5    | status     | Utf8                        | 391.63 KiB | <1%   | 1/1   | miniblock / flat+dictionary+variable / none
+  RANK | COLUMN     | TYPE                                                 | ON DISK    | SHARE | FILES | CURRENT ENCODING
+  -----+------------+------------------------------------------------------+------------+-------+-------+----------------------------------------------------------------------------------------------------
+  1    | embedding  | FixedSizeList(64 x Float32)                          | 24.41 MiB  | 33%   | 1/1   | fullzip / fixed-size-list+flat / none
+  2    | event_json | Utf8                                                 | 18.32 MiB  | 24%   | 1/1   | miniblock / variable+flat / none
+  3    | messages   | List(Struct("role", "content", "reasoning_content")) | 16.11 MiB  | 21%   | 1/1   | miniblock / bitpacking+flat+dictionary+variable / none; miniblock / bitpacking+flat+variable / none
+  4    | payload    | Binary                                               | 12.70 MiB  | 17%   | 1/1   | miniblock / variable+flat / none
+  5    | context    | Struct("source", "language", "turn_count")           | 1.15 MiB   | 1%    | 1/1   | miniblock / flat / none; miniblock / flat+dictionary+variable / none
+  6    | row_id     | UInt64                                               | 783.16 KiB | 1%    | 1/1   | miniblock / flat / none
+  7    | status     | Utf8                                                 | 391.63 KiB | <1%   | 1/1   | miniblock / flat+dictionary+variable / none
 ```
 
 Changing only the file format produced these estimates:
 
 | Target format | Projected file size | Change from the original file |
 | --- | ---: | ---: |
-| 2.2 | 56.61 MiB | 25.00 KiB larger |
-| 2.3 (experimental) | 56.61 MiB | 25.00 KiB larger |
+| 2.2 | 73.89 MiB | 47.33 KiB larger |
+| 2.3 (experimental) | 73.89 MiB | 47.33 KiB larger |
 
 The encoding recommendations were:
 
 ```text
-  COLUMN     | CURRENT ENCODING                 | SUGGESTED ENCODING                              | FORMAT    | PROJECTED FILE | SAVINGS
-  -----------+----------------------------------+-------------------------------------------------+-----------+----------------+----------------
-  row_id     | miniblock / flat / none          | auto(miniblock) / auto(bss+flat) / zstd:6       | 2.1 → 2.2 | 55.95 MiB      | 646.29 KiB (1%)
-  event_json | miniblock / variable+flat / none | auto(miniblock) / auto(variable+flat) / zstd:6  | 2.1 → 2.2 | 41.32 MiB      | 15.26 MiB (26%)
-  payload    | miniblock / variable+flat / none | auto(miniblock) / auto(variable+flat) / zstd:12 | 2.1 → 2.2 | 46.78 MiB      | 9.80 MiB (17%)
+  COLUMN     | CURRENT ENCODING                                                                                    | SUGGESTED ENCODING                                                                                                                        | FORMAT    | PROJECTED FILE | SAVINGS
+  -----------+-----------------------------------------------------------------------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------+-----------+----------------+-----------------
+  row_id     | miniblock / flat / none                                                                             | auto(miniblock) / auto(bss+flat) / zstd:6                                                                                                 | 2.1 → 2.2 | 73.23 MiB      | 624.01 KiB (<1%)
+  status     | miniblock / flat+dictionary+variable / none                                                         | auto(miniblock) / auto(bss+flat+dictionary+variable) / zstd:12+lz4                                                                        | 2.1 → 2.2 | 73.53 MiB      | 313.69 KiB (<1%)
+  event_json | miniblock / variable+flat / none                                                                    | auto(miniblock) / auto(variable+flat) / zstd:6                                                                                            | 2.1 → 2.2 | 58.60 MiB      | 15.24 MiB (20%)
+  payload    | miniblock / variable+flat / none                                                                    | auto(miniblock) / auto(variable+flat) / zstd:12                                                                                           | 2.1 → 2.2 | 64.06 MiB      | 9.78 MiB (13%)
+  messages   | miniblock / bitpacking+flat+dictionary+variable / none; miniblock / bitpacking+flat+variable / none | auto(miniblock) / auto(bitpacking+flat+bss+dictionary+variable) / zstd:12+lz4; auto(miniblock) / auto(bitpacking+flat+variable) / zstd:12 | 2.1 → 2.2 | 62.09 MiB      | 11.75 MiB (15%)
+  context    | miniblock / flat / none; miniblock / flat+dictionary+variable / none                                | auto(miniblock) / auto(bss+flat) / zstd:12; auto(miniblock) / auto(bss+flat+dictionary+variable) / zstd:12+lz4                            | 2.1 → 2.2 | 72.82 MiB      | 1.02 MiB (1%)
 ```
+
+The fixture test `fixture_nested_estimates_match_full_column_rewrites` checks
+the nested recommendations against a full rewrite of each column: from a
+4,096-row sample, the projected `messages` size was within about 4% of the
+rewritten size. The nearly constant `context` column compresses to about 14 KiB
+in full but projects to about 90 KiB, because fixed page overhead dominates a
+small sample. Its projected savings are still within 10% of the actual savings.
 
 Encoding cells show `structural layout / value encoding / compression`.
 `auto(...)` identifies what Lance actually selected for an automatic setting;

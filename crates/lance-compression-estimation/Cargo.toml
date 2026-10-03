@@ -23,4 +23,5 @@ opendal.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+arrow-buffer.workspace = true
 tokio.workspace = true

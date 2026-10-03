@@ -6,7 +6,8 @@ use crate::{
     EncodingFileVersion, EncodingMeasurement, EncodingPlan, GeneralCompression, StructuralEncoding,
     ValueEncoding,
 };
-use arrow_schema::{DataType, Field as ArrowField};
+use arrow_schema::{DataType, Field as ArrowField, FieldRef};
+use std::sync::Arc;
 
 /// Generate the independent axis sweep for a top-level Arrow field.
 ///
@@ -20,29 +21,27 @@ pub fn candidate_plans_for_type(
     let baseline = EncodingPlan::baseline(file_version);
     let mut plans = compression_candidate_plans(file_version);
 
-    if !matches!(data_type, DataType::Struct(_)) {
-        for structural in [StructuralEncoding::MiniBlock, StructuralEncoding::FullZip] {
-            plans.push(EncodingPlan {
-                structural,
-                ..baseline
-            });
-        }
-        if fixed_bit_width(data_type).is_some()
-            || matches!(
-                data_type,
-                DataType::Boolean
-                    | DataType::Utf8
-                    | DataType::LargeUtf8
-                    | DataType::Binary
-                    | DataType::LargeBinary
-            )
-        {
-            plans.push(EncodingPlan {
-                structural: StructuralEncoding::Sparse,
-                file_version: EncodingFileVersion::V2_3,
-                ..baseline
-            });
-        }
+    for structural in [StructuralEncoding::MiniBlock, StructuralEncoding::FullZip] {
+        plans.push(EncodingPlan {
+            structural,
+            ..baseline
+        });
+    }
+    if fixed_bit_width(data_type).is_some()
+        || matches!(
+            data_type,
+            DataType::Boolean
+                | DataType::Utf8
+                | DataType::LargeUtf8
+                | DataType::Binary
+                | DataType::LargeBinary
+        )
+    {
+        plans.push(EncodingPlan {
+            structural: StructuralEncoding::Sparse,
+            file_version: EncodingFileVersion::V2_3,
+            ..baseline
+        });
     }
 
     let mut add_value = |value, general| {
@@ -132,12 +131,6 @@ pub(super) fn combined_candidate_plans(measurements: &[EncodingMeasurement]) -> 
 
 pub(super) fn with_candidate_field(field: &ArrowField, plan: EncodingPlan) -> ArrowField {
     let mut metadata = field.metadata().clone();
-    if plan.structural != StructuralEncoding::Auto {
-        metadata.insert(
-            "lance-encoding:structural-encoding".into(),
-            plan.structural.to_string(),
-        );
-    }
     if plan.value != ValueEncoding::Auto {
         for key in [
             "rle-threshold",
@@ -163,8 +156,34 @@ pub(super) fn with_candidate_field(field: &ArrowField, plan: EncodingPlan) -> Ar
     for (key, value) in controls {
         metadata.insert(format!("lance-encoding:{key}"), (*value).into());
     }
+    with_physical_controls(&field.clone().with_metadata(metadata), plan)
+}
+
+/// Lance reads structural and general-compression controls from the field that
+/// owns each physical column and never inherits them from a nested parent, so
+/// they are applied to every field in the tree.
+fn with_physical_controls(field: &ArrowField, plan: EncodingPlan) -> ArrowField {
+    let child = |child: &FieldRef| Arc::new(with_physical_controls(child, plan));
+    let data_type = match field.data_type() {
+        DataType::List(item) => DataType::List(child(item)),
+        DataType::LargeList(item) => DataType::LargeList(child(item)),
+        DataType::FixedSizeList(item, size) => DataType::FixedSizeList(child(item), *size),
+        DataType::Map(entries, sorted) => DataType::Map(child(entries), *sorted),
+        DataType::Struct(fields) => DataType::Struct(fields.iter().map(child).collect()),
+        data_type => data_type.clone(),
+    };
+    let mut metadata = field.metadata().clone();
+    if plan.structural != StructuralEncoding::Auto {
+        metadata.insert(
+            "lance-encoding:structural-encoding".into(),
+            plan.structural.to_string(),
+        );
+    }
     apply_compression(&mut metadata, plan.general);
-    field.clone().with_metadata(metadata)
+    field
+        .clone()
+        .with_data_type(data_type)
+        .with_metadata(metadata)
 }
 
 #[cfg(test)]
@@ -226,5 +245,40 @@ mod tests {
                 .iter()
                 .any(|plan| plan.structural == StructuralEncoding::Sparse)
         );
+        assert!(
+            structs
+                .iter()
+                .any(|plan| plan.structural == StructuralEncoding::FullZip)
+        );
+    }
+
+    #[test]
+    fn physical_controls_reach_nested_leaves_but_value_controls_stay_on_parent() {
+        let leaf = ArrowField::new("content", DataType::Utf8, false)
+            .with_metadata([("lance-encoding:compression".into(), "none".into())].into());
+        let item = ArrowField::new("item", DataType::Struct(vec![leaf].into()), false);
+        let field = ArrowField::new("messages", DataType::List(Arc::new(item)), false);
+        let plan = EncodingPlan {
+            structural: StructuralEncoding::MiniBlock,
+            value: ValueEncoding::PackedStruct,
+            general: GeneralCompression::Zstd { level: 3 },
+            file_version: EncodingFileVersion::V2_2,
+        };
+        let candidate = with_candidate_field(&field, plan);
+        let DataType::List(item) = candidate.data_type() else {
+            panic!("list shape changed");
+        };
+        let DataType::Struct(leaves) = item.data_type() else {
+            panic!("struct shape changed");
+        };
+        let metadata = leaves[0].metadata();
+        assert_eq!(metadata["lance-encoding:compression"], "zstd");
+        assert_eq!(metadata["lance-encoding:compression-level"], "3");
+        assert_eq!(metadata["lance-encoding:structural-encoding"], "miniblock");
+        assert!(!item.metadata().contains_key("lance-encoding:packed"));
+        assert_eq!(candidate.metadata()["lance-encoding:packed"], "true");
+
+        let baseline = with_candidate_field(&field, EncodingPlan::baseline(plan.file_version));
+        assert_eq!(baseline, field);
     }
 }
